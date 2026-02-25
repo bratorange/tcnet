@@ -1,6 +1,5 @@
 use std::net::IpAddr;
-
-
+use deku::{DekuRead, DekuWrite};
 
 struct Node {
     name: String,
@@ -16,4 +15,12 @@ impl Node {
 
         ret
     }
+}
+
+#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+struct NodeConfig {
+    need_authentication: bool,
+    supports_tcncm: bool,
+    supports_tcnasdps: bool,
+    dnd: bool,
 }
