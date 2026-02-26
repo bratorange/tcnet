@@ -1,3 +1,4 @@
+use std::fmt::Debug;
 use deku::{DekuRead, DekuWrite};
 
 pub type NodeId = u16;
@@ -18,6 +19,21 @@ pub enum AutoMasterMode{
     Variant = 0, // TODO
 }
 
+#[derive(PartialEq, DekuRead, DekuWrite)]
+pub struct AsciiString<const N: usize>(pub [u8; N]);
+
+impl<const N: usize> std::fmt::Display for AsciiString<N> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", std::str::from_utf8(&self.0).unwrap())
+    }
+}
+
+impl<const N: usize> Debug for AsciiString<N> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", &self)
+    }
+}
+
 #[derive(Debug, PartialEq, DekuRead, DekuWrite)]
 pub struct ManagementHeader {
     pub node_id: NodeId,
@@ -25,7 +41,7 @@ pub struct ManagementHeader {
     pub protocol_version_minor: u8,
     pub _header: [u8; 3], // this just here for serde purposes and must allways be "TCN"
     pub message_type: u8,
-    pub mode_name: [u8; 8],
+    pub mode_name: AsciiString<8>,
     pub seq: u8,
     pub node_type: u8,
     pub node_options: NodeOptions,

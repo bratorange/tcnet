@@ -1,4 +1,4 @@
-use crate::tcnet_package_serde::{Data, ManagementHeader, StatusData};
+use crate::tcnet_package_serde::{Data, ManagementHeader, OptInData, StatusData};
 use deku::{DekuContainerRead, DekuError};
 use std::fmt::Debug;
 use log::debug;
@@ -27,6 +27,10 @@ impl Package {
             5 => {
                 let (_, inner) = StatusData::from_bytes(remaining).map_err(|x| SerdeError::InvalidData(x))?;
                 Data::Status(inner)
+            }
+            2 => {
+                let (_, inner) = OptInData::from_bytes(remaining).map_err(|x| SerdeError::InvalidData(x))?;
+                Data::OptIn(inner)
             }
             _ => {return Err(SerdeError::MessageTypeNotImplemented)},
         };
