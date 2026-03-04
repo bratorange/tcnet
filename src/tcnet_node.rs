@@ -47,7 +47,7 @@ impl Default for NodeConfig{
             application_name: into_ascii!("Someapplication_"),
             application_major_version: 0,
             application_minor_version: 0,
-            application_bug_version: 0,
+            application_bug_version: 102,
             mode_name: into_ascii!("Default_"),
             node_options: NodeOptions::empty(),
         }
@@ -117,12 +117,12 @@ async fn broadcast(node: Node, broadcast_socket: Arc<UdpSocket>) {
     let broadcast_addr = SocketAddr::V4(SocketAddrV4::new([255, 255, 255, 255].into(), 60_000));
     let mut interval = interval(Duration::from_secs(1));
     loop {
-        interval.tick().await;
         let node_state = node.state.read().await;
         let payload = opt_in_packet(&node, &node_state, 0)
             .expect("TCNet: Could not serialize opt in packet");
         let _ = broadcast_socket.send_to(&payload, broadcast_addr);
         trace!("Sent opt in packet");
+        interval.tick().await;
     }
 }
 
@@ -141,7 +141,7 @@ fn management_header(node: &Node, node_state: &DynamicNodeState, message_type: u
     }
 }
 fn opt_in_packet(node: &Node, node_state: &DynamicNodeState, seq: u8) -> Result<Vec<u8>, DekuError> {
-    let header = management_header(node, node_state, 20, seq);
+    let header = management_header(node, node_state, 2, seq);
     let data = OptInData{
         node_count: node_state.discovered_nodes.len() as u16,
         node_listener_port: node.config.unicast_port,

@@ -1,4 +1,4 @@
-use std::fmt::Debug;
+use std::fmt::{Debug, Formatter};
 use std::io::{Read, Seek, Write};
 use bitflags::bitflags;
 use deku::{DekuError, DekuRead, DekuReader, DekuWrite, DekuWriter};
@@ -10,7 +10,7 @@ pub type NodeId = u16;
 bitflags! {
     #[repr(transparent)]
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct NodeOptions: u8 {
+    pub struct NodeOptions: u16 {
         const NEED_AUTHENTICATION = 1;  // Authentication for extended communication needed
         const SUPPORTS_TCNCM = 2;       // Listens to TCNet Control Messages
         const SUPPORTS_TCNASDP = 4;     // Listens to TCNet Application Specific Data Packet
@@ -20,7 +20,7 @@ bitflags! {
 
 impl DekuWriter for NodeOptions {
     fn to_writer<W: Write + Seek>(&self, writer: &mut Writer<W>, _: ()) -> Result<(), DekuError> {
-        writer.write_bytes(&[self.bits()])
+        writer.write_bytes(&self.bits().to_le_bytes())
     }
 }
 
@@ -29,14 +29,30 @@ impl DekuReader<'_> for NodeOptions {
     where
         Self: Sized
     {
-        let mut buf = [0u8];
-        let _ = reader.read_bytes(1, &mut buf, Order::Lsb0);
-        let bits = u8::from_le_bytes(buf);
+        let mut buf = [0u8; 2];
+        let _ = reader.read_bytes(2, &mut buf, Order::Lsb0);
+        let bits = u16::from_le_bytes(buf);
         Ok(NodeOptions::from_bits(bits).unwrap())
     }
 }
 
 pub type Timestamp = u32; // timestamp in microseconds
+
+#[derive(PartialEq, DekuWrite, DekuRead)]
+pub struct ReservedData<const N: usize>(pub [u8; N]);
+
+impl<const N: usize> Default for ReservedData<N> {
+    fn default() -> Self {
+        ReservedData([0; N])
+    }
+}
+
+impl<const N: usize> Debug for ReservedData<N> {
+    fn fmt(&self, _: &mut Formatter<'_>) -> std::fmt::Result {
+        Ok(())
+    }
+}
+
 
 #[derive(Debug, PartialEq, Clone, Copy, DekuRead, DekuWrite)]
 #[deku(id_type = "u8")]
@@ -100,13 +116,13 @@ pub struct OptInData{
     pub node_count: u16, // Amount of Registered Node
     pub node_listener_port: u16,            // Listener Port for Unicast Messages
     pub uptime: u16,                        // Uptime of Node in SEC
-    pub _reserved0: [u8; 2],                // RESERVED
+    pub _reserved0: ReservedData<2>,                // RESERVED
     pub vendor_name: AsciiString<16>,              // Vendor
     pub application: AsciiString<16>,              // Application / Device Name
     pub application_major_version: u8,      // Application/Device Major Version
     pub application_minor_version: u8,      // Application/Device Minor Version
     pub application_bug_version: u8,        // Application/Device Minor Version
-    pub _reserved1: [u8; 1],                // RESERVED
+    pub _reserved1: ReservedData<1>,                // RESERVED
 }
 
 // TODO Opt-Out package
@@ -147,10 +163,10 @@ pub struct StatusData {
     pub layer_b_track_id: u32,              // Assigned Track ID for Layer B
     pub layer_m_track_id: u32,              // Assigned Track ID for Layer M
     pub layer_c_track_id: u32,              // Assigned Track ID for Layer C
-    pub _reserved1: [u8; 1],                // RESERVED
+    pub _reserved1: ReservedData<1>,                // RESERVED
     pub smpte_mode: u8,                     // SMPTE Mode
     pub auto_master_mode: AutoMasterMode,   // Auto Master Mode
-    pub _reserved2: [u8; 15],               // RESERVED
+    pub _reserved2: ReservedData<15>,               // RESERVED
     pub app_specific: [u8; 72],             // APP SPECIFIC
     pub layer_1_name: [u8; 16],             // Layer 1 Source
     pub layer_2_name: [u8; 16],             // Layer 2 Source
@@ -173,7 +189,7 @@ pub struct OptOutData {
 #[derive(Debug, PartialEq, DekuRead, DekuWrite)]
 pub struct TimeSyncData {
     step: u8,                           // Step No (0=Initialize, 1=Response)
-    _reserved0: u8,                     // RESERVED
+    _reserved0: ReservedData<1>,        // RESERVED
     node_listener_port: u16,            // Listener Port for Unicast Messages
     remote_timestamp: u32,              // Timestamp of Remote Node
 }
@@ -198,10 +214,10 @@ pub struct RequestData {
 #[derive(Debug, PartialEq, DekuRead, DekuWrite)]
 pub struct ControlData {
     step: u8,                           // Step No (0=Initialize, 1=Response)
-    _reserved0: u8,                     // RESERVED
+    _reserved0: ReservedData<1>,                     // RESERVED
     #[deku(endian = "little")]
     data_size: u32,                     // Total Data Size
-    _reserved1: [u8; 12],               // RESERVED
+    _reserved1: ReservedData<12>,               // RESERVED
     #[deku(count = "data_size")]
     control_path: Vec<u8>,              // String with Control Path (ASCII TEXT)
 }
@@ -210,10 +226,10 @@ pub struct ControlData {
 #[derive(Debug, PartialEq, DekuRead, DekuWrite)]
 pub struct TextData {
     step: u8,                           // Step No (0=Initialize, 1=Response)
-    _reserved0: u8,                     // RESERVED
+    _reserved0: ReservedData<1>,                     // RESERVED
     #[deku(endian = "little")]
     data_size: u32,                     // Total Data Size
-    _reserved1: [u8; 12],               // RESERVED
+    _reserved1: ReservedData<12>,               // RESERVED
     #[deku(count = "data_size")]
     text_data: Vec<u8>,                 // String Text Data (ASCII TEXT)
 }
@@ -221,11 +237,11 @@ pub struct TextData {
 // KEYBOARD DATA (Message Type 132)
 #[derive(Debug, PartialEq, DekuRead, DekuWrite)]
 pub struct KeyboardData {
-    _reserved0: u8,                     // RESERVED
-    _reserved1: u8,                     // RESERVED
+    _reserved0: ReservedData<1>,                     // RESERVED
+    _reserved1: ReservedData<1>,                     // RESERVED
     #[deku(endian = "little")]
     data_size: u32,                     // Total Data Size
-    _reserved2: [u8; 12],               // RESERVED
+    _reserved2: ReservedData<12>,               // RESERVED
     keyboard_data: [u8; 2],             // Keyboard Data (HEX ASCII Code)
 }
 
@@ -234,11 +250,11 @@ pub struct KeyboardData {
 pub struct MetricsData {
     data_type: u8,                      // Datatype 2 = Metrics
     layer_id: u8,                       // Layer Number
-    _reserved0: u8,                     // RESERVED
+    _reserved0: ReservedData<1>,                     // RESERVED
     layer_state: u8,                    // Layer State
-    _reserved1: u8,                     // RESERVED
+    _reserved1: ReservedData<1>,                     // RESERVED
     sync_master: u8,                    // Sync Master
-    _reserved2: u8,                     // RESERVED
+    _reserved2: ReservedData<1>,                     // RESERVED
     beat_marker: u8,                    // Beat Marker
     #[deku(endian = "little")]
     track_length: u32,                  // Track Length in Milliseconds
@@ -246,10 +262,10 @@ pub struct MetricsData {
     current_position: u32,              // Play head Position in Milliseconds
     #[deku(endian = "little")]
     speed: u32,                         // Play head Speed
-    _reserved3: [u8; 13],               // RESERVED
+    _reserved3: ReservedData<13>,               // RESERVED
     #[deku(endian = "little")]
     beat_number: u32,                   // Beat Number
-    _reserved4: [u8; 51],               // RESERVED
+    _reserved4: ReservedData<51>,               // RESERVED
     #[deku(endian = "little")]
     bpm: u32,                           // BPM
     #[deku(endian = "little")]
@@ -263,8 +279,8 @@ pub struct MetricsData {
 pub struct MetaData {
     data_type: u8,                      // Datatype 4 = Metadata
     layer_id: u8,                       // Layer ID
-    _reserved0: u8,                     // RESERVED
-    _reserved1: [u8; 2],                // RESERVED
+    _reserved0: ReservedData<1>,                     // RESERVED
+    _reserved1: ReservedData<2>,                // RESERVED
     track_artist: [u8; 256],            // Track Artist Name (UTF-16 in v3.5+)
     track_title: [u8; 256],             // Track Title Name (UTF-16 in v3.5+)
     #[deku(endian = "little")]
@@ -293,7 +309,7 @@ pub struct BeatGridEntry {
     #[deku(endian = "little")]
     beat_number: u16,                   // Beat Number
     beat_type: u8,                      // 20 = Downbeat, 10 = Upbeat
-    _reserved0: u8,                     // RESERVED
+    _reserved0: ReservedData<1>,                     // RESERVED
     #[deku(endian = "little")]
     beat_timestamp: u32,                // Timestamp in MS
 }
@@ -302,21 +318,21 @@ pub struct BeatGridEntry {
 #[derive(Debug, PartialEq, DekuRead, DekuWrite)]
 pub struct CueEntry {
     cue_type: u8,                       // Cue Type
-    _reserved0: u8,                     // RESERVED
+    _reserved0: ReservedData<1>,                     // RESERVED
     #[deku(endian = "little")]
     cue_in_time: u32,                   // CUE IN Time
     #[deku(endian = "little")]
     cue_out_time: u32,                  // CUE OUT Time
-    _reserved1: u8,                     // RESERVED
+    _reserved1: ReservedData<1>,                     // RESERVED
     cue_color: [u8; 3],                 // CUE Color (R, G, B)
-    _reserved2: [u8; 8],                // RESERVED
+    _reserved2: ReservedData<8>,                // RESERVED
 }
 
 #[derive(Debug, PartialEq, DekuRead, DekuWrite)]
 pub struct CueData {
     data_type: u8,                      // Datatype 12 = Cue Data
     layer_id: u8,                       // Layer Number
-    _reserved0: [u8; 16],               // RESERVED
+    _reserved0: ReservedData<16>,               // RESERVED
     #[deku(endian = "little")]
     loop_in: u32,                       // Loop IN Time
     #[deku(endian = "little")]
@@ -335,7 +351,7 @@ pub struct SmallWaveformData {
     total_packets: u32,                 // Total Packets used for data
     #[deku(endian = "little")]
     packet_no: u32,                     // Packet Number
-    _reserved0: [u8; 4],                // RESERVED
+    _reserved0: ReservedData<4>,                // RESERVED
     waveform_data: [u8; 2400],          // BLevel (Odd Bytes) / BColor (Even Bytes)
 }
 
@@ -381,32 +397,32 @@ pub struct MixerData {
     data_type: u8,                      // Datatype 150 = Mixer Data
     mixer_id: u8,                       // Mixer ID
     mixer_type: u8,                     // Mixer Type
-    _reserved0: u8,                     // RESERVED
-    _reserved1: u8,                     // RESERVED
+    _reserved0: ReservedData<1>,        // RESERVED
+    _reserved1: ReservedData<1>,        // RESERVED
     mixer_name: [u8; 16],               // Name of Mixer
-    _reserved2: [u8; 12],               // RESERVED
-    _reserved3: [u8; 2],                // RESERVED FOR MIC 1-2 LEVEL
+    _reserved2: ReservedData<12>,       // RESERVED
+    _reserved3: ReservedData<2>,        // RESERVED FOR MIC 1-2 LEVEL
     mic_eq_hi: u8,                      // Mic EQ HI
     mic_eq_low: u8,                     // Mic EQ Low
     master_audio_level: u8,             // Master Audio Level
     master_fader_level: u8,             // Master Fader Level
-    _reserved4: [u8; 4],                // RESERVED
+    _reserved4: ReservedData<4>,        // RESERVED
     link_cue_a: u8,                     // Link CUE A
     link_cue_b: u8,                     // Link CUE B
     master_filter: u8,                  // Master Filter
-    _reserved5: u8,                     // RESERVED
+    _reserved5: ReservedData<1>,        // RESERVED
     master_cue_a: u8,                   // Master CUE A
     master_cue_b: u8,                   // Master CUE B
-    _reserved6: u8,                     // RESERVED
+    _reserved6: ReservedData<1>,        // RESERVED
     master_isolator_on_off: u8,         // Master Isolator Switch
     master_isolator_hi: u8,             // Master Isolator Hi
     master_isolator_mid: u8,            // Master Isolator Mid
     master_isolator_low: u8,            // Master Isolator Low
-    _reserved7: u8,                     // RESERVED
+    _reserved7: ReservedData<1>,        // RESERVED
     filter_hpf: u8,                     // Filter HPF
     filter_lpf: u8,                     // Filter LPF
     filter_resonance: u8,               // Filter Resonance
-    _reserved8: [u8; 2],                // RESERVED
+    _reserved8: ReservedData<2>,        // RESERVED
     send_fx_effect: u8,                 // Send FX Effect
     send_fx_ext_1: u8,                  // Send Return Ext 1
     send_fx_ext_2: u8,                  // Send Return Ext 2
@@ -419,7 +435,7 @@ pub struct MixerData {
     send_return_3_type: u8,             // Send Return 3 Type
     send_return_3_on_off: u8,           // Send Return 3 ON/OFF
     send_return_3_level: u8,            // Send Return 3 Level
-    _reserved9: u8,                     // RESERVED
+    _reserved9: ReservedData<1>,        // RESERVED
     channel_fader_curve: u8,            // Channel Fader Curve
     cross_fader_curve: u8,              // Cross Fader Curve
     cross_fader: u8,                    // Cross Fader
@@ -537,7 +553,7 @@ pub struct TimePacketData {
     lb_layer_state: u8,                 // Layer B State
     lm_layer_state: u8,                 // Layer M State
     lc_layer_state: u8,                 // Layer C State
-    _reserved0: u8,                     // RESERVED
+    _reserved0: ReservedData<1>,                     // RESERVED
     smpte_mode: u8,                     // General SMPTE Mode
     l1_timecode: LayerTimecode,         // Layer 1 Timecode
     l2_timecode: LayerTimecode,         // Layer 2 Timecode
