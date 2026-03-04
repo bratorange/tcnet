@@ -1,4 +1,4 @@
-use crate::tcnet_package_serde::*;
+use crate::tcnet_packet_serde::*;
 use deku::{DekuContainerRead, DekuError};
 use std::fmt::Debug;
 use log::debug;

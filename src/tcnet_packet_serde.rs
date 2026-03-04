@@ -1,26 +1,73 @@
 use std::fmt::Debug;
-use deku::{DekuRead, DekuWrite};
+use std::io::{Read, Seek, Write};
+use bitflags::bitflags;
+use deku::{DekuError, DekuRead, DekuReader, DekuWrite, DekuWriter};
+use deku::ctx::Order;
+use deku::prelude::{Reader, Writer};
 
 pub type NodeId = u16;
-pub type NodeOptions = u16;
+
+bitflags! {
+    #[repr(transparent)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct NodeOptions: u8 {
+        const NEED_AUTHENTICATION = 1;  // Authentication for extended communication needed
+        const SUPPORTS_TCNCM = 2;       // Listens to TCNet Control Messages
+        const SUPPORTS_TCNASDP = 4;     // Listens to TCNet Application Specific Data Packet
+        const DND = 8;                  // Do not disturb/Sleeping. Node will request data itself if needed to avoid traffic
+    }
+}
+
+impl DekuWriter for NodeOptions {
+    fn to_writer<W: Write + Seek>(&self, writer: &mut Writer<W>, _: ()) -> Result<(), DekuError> {
+        writer.write_bytes(&[self.bits()])
+    }
+}
+
+impl DekuReader<'_> for NodeOptions {
+    fn from_reader_with_ctx<R: Read + Seek>(reader: &mut Reader<R>, _: ()) -> Result<Self, DekuError>
+    where
+        Self: Sized
+    {
+        let mut buf = [0u8];
+        let _ = reader.read_bytes(1, &mut buf, Order::Lsb0);
+        let bits = u8::from_le_bytes(buf);
+        Ok(NodeOptions::from_bits(bits).unwrap())
+    }
+}
+
 pub type Timestamp = u32; // timestamp in microseconds
 
-#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+#[derive(Debug, PartialEq, Clone, Copy, DekuRead, DekuWrite)]
 #[deku(id_type = "u8")]
 #[repr(u8)]
 pub enum NodeType {
-    Variant = 0, // TODO
+    Auto = 1,
+    Master= 2,
+    Slave = 4,
+    Repeater = 8,
 }
 
-#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+#[derive(Debug, PartialEq, Clone, Copy, DekuRead, DekuWrite)]
 #[deku(id_type = "u8")]
 #[repr(u8)]
 pub enum AutoMasterMode{
     Variant = 0, // TODO
 }
 
-#[derive(PartialEq, DekuRead, DekuWrite)]
+#[derive(PartialEq, Clone, Copy, DekuRead, DekuWrite)]
 pub struct AsciiString<const N: usize>(pub [u8; N]);
+
+#[macro_export]
+macro_rules! into_ascii {
+    ($str:literal) => {{
+        use crate::tcnet_packet_serde::AsciiString;
+        const N: usize = $str.len();
+        let mut arr: [u8; N] = [0; N];
+        arr[..N].copy_from_slice($str.as_bytes());
+        AsciiString(arr)
+    }};
+}
 
 impl<const N: usize> std::fmt::Display for AsciiString<N> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -39,7 +86,7 @@ pub struct ManagementHeader {
     pub node_id: NodeId,
     pub protocol_version_major: u8,
     pub protocol_version_minor: u8,
-    pub _header: [u8; 3], // this just here for serde purposes and must allways be "TCN"
+    pub _header: AsciiString<3>, // this just here for serde purposes and must allways be "TCN"
     pub message_type: u8,
     pub mode_name: AsciiString<8>,
     pub seq: u8,
@@ -50,16 +97,16 @@ pub struct ManagementHeader {
 
 #[derive(Debug, PartialEq, DekuRead, DekuWrite)]
 pub struct OptInData{
-    node_count: u16, // Amount of Registered Node
-    node_listener_port: u16,            // Listener Port for Unicast Messages
-    uptime: u16,                        // Uptime of Node in SEC
-    _reserved0: [u8; 2],                // RESERVED
-    vendor_name: [u8; 16],              // Vendor
-    application: [u8; 16],              // Application / Device Name
-    application_major_version: u8,      // Application/Device Major Version
-    application_minor_version: u8,      // Application/Device Minor Version
-    application_bug_version: u8,        // Application/Device Minor Version
-    _reserved1: [u8; 1],                // RESERVED
+    pub node_count: u16, // Amount of Registered Node
+    pub node_listener_port: u16,            // Listener Port for Unicast Messages
+    pub uptime: u16,                        // Uptime of Node in SEC
+    pub _reserved0: [u8; 2],                // RESERVED
+    pub vendor_name: AsciiString<16>,              // Vendor
+    pub application: AsciiString<16>,              // Application / Device Name
+    pub application_major_version: u8,      // Application/Device Major Version
+    pub application_minor_version: u8,      // Application/Device Minor Version
+    pub application_bug_version: u8,        // Application/Device Minor Version
+    pub _reserved1: [u8; 1],                // RESERVED
 }
 
 // TODO Opt-Out package
@@ -73,46 +120,46 @@ pub enum LayerStatus{
 
 #[derive(Debug, PartialEq, DekuRead, DekuWrite)]
 pub struct StatusData {
-    node_count: u16,                    // Amount of Registered Nodes
-    node_listener_port: u16,            // Listener Port for Unicast Messages
-    _reserved0:[u8; 6],                 // RESERVED
-    layer_1_source: u8,                 // Layer 1 Source
-    layer_2_source: u8,                 // Layer 2 Source
-    layer_3_source: u8,                 // Layer 3 Source
-    layer_4_source: u8,                 // Layer 4 Source
-    layer_a_source: u8,                 // Layer A Source
-    layer_b_source: u8,                 // Layer B Source
-    layer_m_source: u8,                 // Layer M Source
-    layer_c_source: u8,                 // Layer C Source
-    layer_1_status: LayerStatus,        // Layer 1 Status
-    layer_2_status: LayerStatus,        // Layer 2 Status
-    layer_3_status: LayerStatus,        // Layer 3 Status
-    layer_4_status: LayerStatus,        // Layer 4 Status
-    layer_a_status: LayerStatus,        // Layer A Status
-    layer_b_status: LayerStatus,        // Layer B Status
-    layer_m_status: LayerStatus,        // Layer M Status
-    layer_c_status: LayerStatus,        // Layer C Status
-    layer_1_track_id: u32,              // Assigned Track ID for Layer 1
-    layer_2_track_id: u32,              // Assigned Track ID for Layer 2
-    layer_3_track_id: u32,              // Assigned Track ID for Layer 3
-    layer_4_track_id: u32,              // Assigned Track ID for Layer 4
-    layer_a_track_id: u32,              // Assigned Track ID for Layer A
-    layer_b_track_id: u32,              // Assigned Track ID for Layer B
-    layer_m_track_id: u32,              // Assigned Track ID for Layer M
-    layer_c_track_id: u32,              // Assigned Track ID for Layer C
-    _reserved1: [u8; 1],                // RESERVED
-    smpte_mode: u8,              // SMPTE Mode
-    auto_master_mode: AutoMasterMode,   // Auto Master Mode
-    _reserved2: [u8; 15],               // RESERVED
-    app_specific: [u8; 72],             // APP SPECIFIC
-    layer_1_name: [u8; 16],             // Layer 1 Source
-    layer_2_name: [u8; 16],             // Layer 2 Source
-    layer_3_name: [u8; 16],             // Layer 3 Source
-    layer_4_name: [u8; 16],             // Layer 4 Source
-    layer_a_name: [u8; 16],             // Layer A Source
-    layer_b_name: [u8; 16],             // Layer B Source
-    layer_m_name: [u8; 16],             // Layer M Source
-    layer_c_name: [u8; 16],             // Layer C Source
+    pub node_count: u16,                    // Amount of Registered Nodes
+    pub node_listener_port: u16,            // Listener Port for Unicast Messages
+    pub _reserved0:[u8; 6],                 // RESERVED
+    pub layer_1_source: u8,                 // Layer 1 Source
+    pub layer_2_source: u8,                 // Layer 2 Source
+    pub layer_3_source: u8,                 // Layer 3 Source
+    pub layer_4_source: u8,                 // Layer 4 Source
+    pub layer_a_source: u8,                 // Layer A Source
+    pub layer_b_source: u8,                 // Layer B Source
+    pub layer_m_source: u8,                 // Layer M Source
+    pub layer_c_source: u8,                 // Layer C Source
+    pub layer_1_status: LayerStatus,        // Layer 1 Status
+    pub layer_2_status: LayerStatus,        // Layer 2 Status
+    pub layer_3_status: LayerStatus,        // Layer 3 Status
+    pub layer_4_status: LayerStatus,        // Layer 4 Status
+    pub layer_a_status: LayerStatus,        // Layer A Status
+    pub layer_b_status: LayerStatus,        // Layer B Status
+    pub layer_m_status: LayerStatus,        // Layer M Status
+    pub layer_c_status: LayerStatus,        // Layer C Status
+    pub layer_1_track_id: u32,              // Assigned Track ID for Layer 1
+    pub layer_2_track_id: u32,              // Assigned Track ID for Layer 2
+    pub layer_3_track_id: u32,              // Assigned Track ID for Layer 3
+    pub layer_4_track_id: u32,              // Assigned Track ID for Layer 4
+    pub layer_a_track_id: u32,              // Assigned Track ID for Layer A
+    pub layer_b_track_id: u32,              // Assigned Track ID for Layer B
+    pub layer_m_track_id: u32,              // Assigned Track ID for Layer M
+    pub layer_c_track_id: u32,              // Assigned Track ID for Layer C
+    pub _reserved1: [u8; 1],                // RESERVED
+    pub smpte_mode: u8,                     // SMPTE Mode
+    pub auto_master_mode: AutoMasterMode,   // Auto Master Mode
+    pub _reserved2: [u8; 15],               // RESERVED
+    pub app_specific: [u8; 72],             // APP SPECIFIC
+    pub layer_1_name: [u8; 16],             // Layer 1 Source
+    pub layer_2_name: [u8; 16],             // Layer 2 Source
+    pub layer_3_name: [u8; 16],             // Layer 3 Source
+    pub layer_4_name: [u8; 16],             // Layer 4 Source
+    pub layer_a_name: [u8; 16],             // Layer A Source
+    pub layer_b_name: [u8; 16],             // Layer B Source
+    pub layer_m_name: [u8; 16],             // Layer M Source
+    pub layer_c_name: [u8; 16],             // Layer C Source
 }
 
 // OPT-OUT (Message Type 3)

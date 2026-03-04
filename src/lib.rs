@@ -1,5 +1,5 @@
 pub mod tcnet_node;
-pub(crate) mod tcnet_package_serde;
+pub(crate) mod tcnet_packet_serde;
 pub(crate) mod tcnet_package;
 
 const SPEC_MAJOR_VERSION: u8 = 3;
