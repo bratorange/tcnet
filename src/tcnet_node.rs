@@ -5,7 +5,7 @@ use crate::tcnet_packet_serde::{AsciiString, ManagementHeader, NodeId, NodeOptio
 use deku::{DekuContainerWrite, DekuError};
 use kanal::{Receiver, Sender};
 use log::{error, info, trace, warn};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::Arc;
@@ -75,14 +75,15 @@ pub struct Node {
 }
 
 impl Node {
-    pub fn start(bind_address: Ipv4Addr) {
+    pub fn start(bind_address: Ipv4Addr) -> Runtime {
         let rt = Builder::new_multi_thread()
             .worker_threads(1)
             .thread_name("tcnet")
             .enable_all()
             .build().expect("Could not start tokio runtime");
 
-        rt.block_on(Self::run(bind_address));
+        rt.spawn(Self::run(bind_address));
+        rt
     }
 
     async fn run(bind_address: Ipv4Addr) {
@@ -119,57 +120,20 @@ impl Node {
             .expect("Could not bind to unicast socket")
         );
 
-        let (packet_sender, packet_receiver) = kanal::bounded(8);
+        trace!("Starting network processing");
 
-        spawn(listen(node.clone(), broadcast_socket.clone(), packet_sender.clone()));
-        spawn(listen(node.clone(), broadcast_socket2.clone(), packet_sender.clone()));
-        spawn(listen(node.clone(), time_broadcast_socket.clone(), packet_sender.clone()));
-        spawn(listen(node.clone(), unicast_socket.clone(), packet_sender.clone()));
         spawn(broadcast(node.clone(), broadcast_socket.clone()));
-        spawn(process_loop(node.clone(), packet_receiver));
+        spawn(listen(node.clone(), broadcast_socket.clone()));
+        spawn(listen(node.clone(), broadcast_socket2.clone()));
+        spawn(listen(node.clone(), time_broadcast_socket.clone()));
+        spawn(listen(node.clone(), unicast_socket.clone()));
     }
 }
 
-
-async fn process_loop(node: Node, packet_receiver: Receiver<(Ipv4Addr, Packet)>) {
-    while let Ok((src_addr, packet)) = packet_receiver.recv() {
-        match &packet.data {
-            OptIn(opt_in_data) => {
-                let node_config = opt_in_node_config(&src_addr, &packet.header, opt_in_data);
-
-                let mut state = node.state.write().await;
-                let outer = state.discovered_nodes.entry(
-                    src_addr,
-                ).or_insert( (||{
-                    info!("Node {} joined the network", src_addr);
-                    ForeignNode::new()
-                })());
-                outer.last_seen = timestamp_secs();
-                let inner = outer.configs.entry(node_config.node_id).or_insert(node_config);
-                *inner = node_config;
-            }
-
-            OptOut(_) => {
-                let removed_node =
-                    node.state.write().await.discovered_nodes.remove(&src_addr);
-                if removed_node.is_some() {
-                    warn!(
-                        "Node {} has opted out despite not being part of the network (anymore)",
-                        src_addr
-                    );
-                } else {
-                    info!("Node {} has opted out of the network", src_addr);
-                }
-            }
-            _ => todo!(),
-        };
-    }
-}
-
-async fn listen(node: Node, socket: Arc<UdpSocket>, packet_sender: Sender<(Ipv4Addr, Packet)>) -> io::Result<()> {
+async fn listen(node: Node, socket: Arc<UdpSocket>) -> io::Result<()> {
+    let mut buffer = [0; 1024];
+    info!("Start Listening for packets on {}", socket.local_addr()?);
     loop {
-        let mut buffer = [0; 1024];
-        info!("Start Listening for packets on {}", socket.local_addr()?);
         match socket.recv_from(&mut buffer).await {
             Ok((size, src)) => {
                 trace!("Received {} bytes from {}", size, src);
@@ -178,17 +142,40 @@ async fn listen(node: Node, socket: Arc<UdpSocket>, packet_sender: Sender<(Ipv4A
                         trace!("Received packet:");
                         trace!("{:?}", packet);
 
-                        let src = match src {
+                        let src_addr = match src {
                             SocketAddr::V4(addr) => addr.ip().clone(),
                             _ => unreachable!(),
                         };
-                        /*match packet_sender.as_async().send((src, packet)).await {
-                            Ok(_) => {}
-                            Err(_) => {
-                                // no one is processing packets anymore, listening will stop
-                                return Ok(())
-                            },
-                        }*/
+                        match &packet.data {
+                            OptIn(opt_in_data) => {
+                                let node_config = opt_in_node_config(&src_addr, &packet.header, opt_in_data);
+
+                                let mut state = node.state.write().await;
+                                let outer = state.discovered_nodes.entry(
+                                    src_addr,
+                                ).or_insert( (||{
+                                    info!("Node {} joined the network", src_addr);
+                                    ForeignNode::new()
+                                })());
+                                outer.last_seen = timestamp_secs();
+                                let inner = outer.configs.entry(node_config.node_id).or_insert(node_config);
+                                *inner = node_config;
+                            }
+
+                            OptOut(_) => {
+                                let removed_node =
+                                    node.state.write().await.discovered_nodes.remove(&src_addr);
+                                if removed_node.is_some() {
+                                    warn!(
+                        "Node {} has opted out despite not being part of the network (anymore)",
+                        src_addr
+                    );
+                                } else {
+                                    info!("Node {} has opted out of the network", src_addr);
+                                }
+                            }
+                            _ => todo!(),
+                        };
                     },
                     Err(e) => {
                         error!("{:?}", e);
@@ -207,10 +194,11 @@ async fn broadcast(node: Node, broadcast_socket: Arc<UdpSocket>) {
     let broadcast_addr = SocketAddr::V4(SocketAddrV4::new([255, 255, 255, 255].into(), 60_000));
     let mut interval = interval(Duration::from_secs(1));
     loop {
+        trace!("Sending opt in packet...");
         let node_state = node.state.read().await;
         let payload = opt_in_packet(&node, &node_state, 0)
             .expect("TCNet: Could not serialize opt in packet");
-        let _ = broadcast_socket.send_to(&payload, broadcast_addr);
+        let _ = broadcast_socket.send_to(&payload, broadcast_addr).await;
         trace!("Sent opt in packet");
         interval.tick().await;
     }

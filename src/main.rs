@@ -12,8 +12,8 @@ fn main() {
     env_logger::init();
     let args = Args::parse();
     let binding_ip = args.binding_ip;
-    Node::start(binding_ip);
+    let rt = Node::start(binding_ip);
     loop {
-        sleep(Duration::from_secs(1000));
+        sleep(Duration::from_secs(10));
     }
 }

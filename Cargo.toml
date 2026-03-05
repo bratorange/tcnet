@@ -15,8 +15,9 @@ path = "src/main.rs"
 [dependencies]
 bitflags = "2.11.0"
 deku = "0.20.3"
-tokio = { version = "1.49.0", features = ["time", "net", "sync", "rt-multi-thread"] }
+tokio = { version = "1.49.0", features = ["time", "net", "sync", "rt-multi-thread", "tracing"] }
 log = "0.4.29"
 env_logger = "0.11.9"
 clap = { version = "4.5.60", features = ["derive"] }
 kanal = "0.1.1"
+console-subscriber = "0.5.0"
