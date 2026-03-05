@@ -12,5 +12,8 @@ fn main() {
     env_logger::init();
     let args = Args::parse();
     let binding_ip = args.binding_ip;
-    Node::run(binding_ip).expect("Could not start TCNet node");
+    Node::start(binding_ip);
+    loop {
+        sleep(Duration::from_secs(1000));
+    }
 }

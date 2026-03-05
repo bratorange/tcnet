@@ -7,10 +7,12 @@ use kanal::{Receiver, Sender};
 use log::{error, info, trace, warn};
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::net::UdpSocket;
 use tokio::runtime::{Builder, Runtime};
+use tokio::spawn;
 use tokio::sync::RwLock;
 use tokio::time::interval;
 
@@ -73,7 +75,17 @@ pub struct Node {
 }
 
 impl Node {
-    pub fn run(bind_address: Ipv4Addr) -> io::Result<(Self, Runtime)> {
+    pub fn start(bind_address: Ipv4Addr) {
+        let rt = Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("tcnet")
+            .enable_all()
+            .build().expect("Could not start tokio runtime");
+
+        rt.block_on(Self::run(bind_address));
+    }
+
+    async fn run(bind_address: Ipv4Addr) {
         // create prototypical node for test purposes
         let mut node = Self {
             config: NodeConfig::default(),
@@ -81,81 +93,84 @@ impl Node {
         };
         node.config.address = bind_address;
 
+        trace!("binding sockets...");
         let broadcast_socket_addr = SocketAddr::new(node.config.address.into(), 60_000);
-        let broadcast_socket = Arc::new(UdpSocket::bind(broadcast_socket_addr)?);
-        broadcast_socket.set_broadcast(true)?;
+        let broadcast_socket = Arc::new(UdpSocket::bind(broadcast_socket_addr).await
+            .expect("Could not bind to socket 60000"));
+        broadcast_socket.set_broadcast(true)
+            .expect("Could not enable socket 60000 for broadcasting");
 
         let time_broadcast_addr = SocketAddr::new(node.config.address.into(), 60_001);
-        let time_broadcast_socket = Arc::new(UdpSocket::bind(time_broadcast_addr)?);
-        time_broadcast_socket.set_broadcast(true)?;
+        let time_broadcast_socket = Arc::new(UdpSocket::bind(time_broadcast_addr).await
+            .expect("Could not bind to socket 60001"));
+        time_broadcast_socket.set_broadcast(true)
+            .expect("Could not enable socket 60001 for broadcasting");
 
         // The spec requires also listening on this port. However, there is no special use case
         // declared for it.
         let broadcast_socket_addr2 = SocketAddr::new(node.config.address.into(), 60_002);
-        let broadcast_socket2 = Arc::new(UdpSocket::bind(broadcast_socket_addr2)?);
-        broadcast_socket2.set_broadcast(true)?;
+        let broadcast_socket2 = Arc::new(UdpSocket::bind(broadcast_socket_addr2).await
+            .expect("Could not bind to broadcast socket 60002"));
+        broadcast_socket2.set_broadcast(true)
+            .expect("Could not enable socket 60002 for broadcasting");
 
         let unicast_socket_addr = SocketAddr::new(node.config.address.into(), node.config.unicast_port);
-        let unicast_socket = Arc::new(UdpSocket::bind(unicast_socket_addr)?);
-
-
-        let rt = Builder::new_multi_thread()
-            .worker_threads(1)
-            .thread_name("tcnet")
-            .enable_all()
-            .build()?;
+        let unicast_socket = Arc::new(UdpSocket::bind(unicast_socket_addr).await
+            .expect("Could not bind to unicast socket")
+        );
 
         let (packet_sender, packet_receiver) = kanal::bounded(8);
 
-        rt.spawn(listen(node.clone(), broadcast_socket.clone(), packet_sender.clone()));
-        rt.spawn(listen(node.clone(), broadcast_socket2.clone(), packet_sender.clone()));
-        rt.spawn(listen(node.clone(), time_broadcast_socket.clone(), packet_sender.clone()));
-        rt.spawn(listen(node.clone(), unicast_socket.clone(), packet_sender.clone()));
-        rt.spawn(broadcast(node.clone(), broadcast_socket.clone()));
-        rt.block_on(node.clone().process_loop(packet_receiver));
-        Ok((node, rt))
+        spawn(listen(node.clone(), broadcast_socket.clone(), packet_sender.clone()));
+        spawn(listen(node.clone(), broadcast_socket2.clone(), packet_sender.clone()));
+        spawn(listen(node.clone(), time_broadcast_socket.clone(), packet_sender.clone()));
+        spawn(listen(node.clone(), unicast_socket.clone(), packet_sender.clone()));
+        spawn(broadcast(node.clone(), broadcast_socket.clone()));
+        spawn(process_loop(node.clone(), packet_receiver));
     }
+}
 
-    async fn process_loop(&self, packet_receiver: Receiver<(Ipv4Addr, Packet)>) {
-        while let Ok((src_addr, packet)) = packet_receiver.recv() {
-            match &packet.data {
-                OptIn(opt_in_data) => {
-                    let node_config = opt_in_node_config(&src_addr, &packet.header, opt_in_data);
 
-                    let mut state = self.state.write().await;
-                    let outer = state.discovered_nodes.entry(
-                        src_addr,
-                    ).or_insert( (||{
-                        info!("Node {} joined the network", src_addr);
-                        ForeignNode::new()
-                    })());
-                    outer.last_seen = timestamp_secs();
-                    let inner = outer.configs.entry(node_config.node_id).or_insert(node_config);
-                    *inner = node_config;
+async fn process_loop(node: Node, packet_receiver: Receiver<(Ipv4Addr, Packet)>) {
+    while let Ok((src_addr, packet)) = packet_receiver.recv() {
+        match &packet.data {
+            OptIn(opt_in_data) => {
+                let node_config = opt_in_node_config(&src_addr, &packet.header, opt_in_data);
+
+                let mut state = node.state.write().await;
+                let outer = state.discovered_nodes.entry(
+                    src_addr,
+                ).or_insert( (||{
+                    info!("Node {} joined the network", src_addr);
+                    ForeignNode::new()
+                })());
+                outer.last_seen = timestamp_secs();
+                let inner = outer.configs.entry(node_config.node_id).or_insert(node_config);
+                *inner = node_config;
+            }
+
+            OptOut(_) => {
+                let removed_node =
+                    node.state.write().await.discovered_nodes.remove(&src_addr);
+                if removed_node.is_some() {
+                    warn!(
+                        "Node {} has opted out despite not being part of the network (anymore)",
+                        src_addr
+                    );
+                } else {
+                    info!("Node {} has opted out of the network", src_addr);
                 }
-
-                OptOut(_) => {
-                    let removed_node =
-                        self.state.write().await.discovered_nodes.remove(&src_addr);
-                    if removed_node.is_some() {
-                        warn!(
-                            "Node {} has opted out despite not being part of the network (anymore)",
-                            src_addr
-                        );
-                    } else {
-                        info!("Node {} has opted out of the network", src_addr);
-                    }
-                }
-                _ => todo!(),
-            };
-        }
+            }
+            _ => todo!(),
+        };
     }
 }
 
 async fn listen(node: Node, socket: Arc<UdpSocket>, packet_sender: Sender<(Ipv4Addr, Packet)>) -> io::Result<()> {
     loop {
         let mut buffer = [0; 1024];
-        match socket.recv_from(&mut buffer) {
+        info!("Start Listening for packets on {}", socket.local_addr()?);
+        match socket.recv_from(&mut buffer).await {
             Ok((size, src)) => {
                 trace!("Received {} bytes from {}", size, src);
                 match Packet::deserialize_packet(&buffer) {
@@ -167,13 +182,13 @@ async fn listen(node: Node, socket: Arc<UdpSocket>, packet_sender: Sender<(Ipv4A
                             SocketAddr::V4(addr) => addr.ip().clone(),
                             _ => unreachable!(),
                         };
-                        match packet_sender.as_async().send((src, packet)).await {
+                        /*match packet_sender.as_async().send((src, packet)).await {
                             Ok(_) => {}
                             Err(_) => {
                                 // no one is processing packets anymore, listening will stop
                                 return Ok(())
                             },
-                        }
+                        }*/
                     },
                     Err(e) => {
                         error!("{:?}", e);
