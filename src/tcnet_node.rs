@@ -71,6 +71,16 @@ impl Node {
         let broadcast_socket = Arc::new(UdpSocket::bind(broadcast_socket_addr)?);
         broadcast_socket.set_broadcast(true)?;
 
+        let time_broadcast_addr = SocketAddr::new(node.config.address.into(), 60_001);
+        let time_broadcast_socket = Arc::new(UdpSocket::bind(time_broadcast_addr)?);
+        time_broadcast_socket.set_broadcast(true)?;
+
+        // The spec requires also listening on this port. However, there is no special use case
+        // declared for it.
+        let broadcast_socket_addr2 = SocketAddr::new(node.config.address.into(), 60_002);
+        let broadcast_socket2 = Arc::new(UdpSocket::bind(broadcast_socket_addr2)?);
+        broadcast_socket2.set_broadcast(true)?;
+
         let unicast_socket_addr = SocketAddr::new(node.config.address.into(), node.config.unicast_port);
         let unicast_socket = Arc::new(UdpSocket::bind(unicast_socket_addr)?);
 
@@ -81,13 +91,16 @@ impl Node {
             .enable_all()
             .build()?;
 
-        rt.spawn(listen_for_broadcast(node.clone(), broadcast_socket.clone()));
+        rt.spawn(listen(node.clone(), broadcast_socket.clone()));
+        rt.spawn(listen(node.clone(), broadcast_socket2.clone()));
+        rt.spawn(listen(node.clone(), time_broadcast_socket.clone()));
+        rt.spawn(listen(node.clone(), unicast_socket.clone()));
         rt.block_on(broadcast(node.clone(), broadcast_socket.clone()));
         Ok((node, rt))
     }
 }
 
-async fn listen_for_broadcast(node: Node, socket: Arc<UdpSocket>) -> io::Result<()> {
+async fn listen(node: Node, socket: Arc<UdpSocket>) -> io::Result<()> {
     loop {
         let mut buffer = [0; 1024];
         match socket.recv_from(&mut buffer) {
