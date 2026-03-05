@@ -106,7 +106,7 @@ pub struct ManagementHeader {
     pub message_type: u8,
     pub mode_name: AsciiString<8>,
     pub seq: u8,
-    pub node_type: u8,
+    pub node_type: NodeType,
     pub node_options: NodeOptions,
     pub timestamp: Timestamp,
 }

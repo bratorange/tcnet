@@ -1,24 +1,38 @@
+use crate::into_ascii;
+use crate::tcnet_packet::{opt_in_node_config, Packet};
+use crate::tcnet_packet_serde::Data::{OptIn, OptOut};
+use crate::tcnet_packet_serde::{AsciiString, ManagementHeader, NodeId, NodeOptions, NodeType, OptInData};
+use deku::{DekuContainerWrite, DekuError};
+use kanal::{Receiver, Sender};
+use log::{error, info, trace, warn};
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use deku::{DekuContainerWrite, DekuError, DekuRead, DekuWrite};
-use log::{error, trace};
 use tokio::runtime::{Builder, Runtime};
 use tokio::sync::RwLock;
 use tokio::time::interval;
-use crate::into_ascii;
-use crate::tcnet_packet::Packet;
-use crate::tcnet_packet_serde::{AsciiString, ManagementHeader, NodeId, NodeOptions, NodeType, OptInData};
 
-#[derive(Debug, Default)]
-pub(crate) struct DynamicNodeState {
-    pub discovered_nodes: Vec<NodeConfig>,
-    pub uptime: u16,
-    pub timestamp: u32,
+#[derive(Clone)]
+pub(crate) struct ForeignNode {
+    last_seen: u64,
+    configs: HashMap<NodeId, NodeConfig>
 }
 
-#[derive(Debug, Clone)]
+impl ForeignNode {
+    fn new() -> Self {
+        Self { last_seen: 0, configs: HashMap::new(), }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct DynamicNodeState {
+    pub discovered_nodes: HashMap<Ipv4Addr, ForeignNode>,
+    pub uptime: u16,
+}
+
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct NodeConfig {
     pub node_id: NodeId,
     pub node_type: NodeType,
@@ -91,38 +105,88 @@ impl Node {
             .enable_all()
             .build()?;
 
-        rt.spawn(listen(node.clone(), broadcast_socket.clone()));
-        rt.spawn(listen(node.clone(), broadcast_socket2.clone()));
-        rt.spawn(listen(node.clone(), time_broadcast_socket.clone()));
-        rt.spawn(listen(node.clone(), unicast_socket.clone()));
-        rt.block_on(broadcast(node.clone(), broadcast_socket.clone()));
+        let (packet_sender, packet_receiver) = kanal::bounded(8);
+
+        rt.spawn(listen(node.clone(), broadcast_socket.clone(), packet_sender.clone()));
+        rt.spawn(listen(node.clone(), broadcast_socket2.clone(), packet_sender.clone()));
+        rt.spawn(listen(node.clone(), time_broadcast_socket.clone(), packet_sender.clone()));
+        rt.spawn(listen(node.clone(), unicast_socket.clone(), packet_sender.clone()));
+        rt.spawn(broadcast(node.clone(), broadcast_socket.clone()));
+        rt.block_on(node.clone().process_loop(packet_receiver));
         Ok((node, rt))
+    }
+
+    async fn process_loop(&self, packet_receiver: Receiver<(Ipv4Addr, Packet)>) {
+        while let Ok((src_addr, packet)) = packet_receiver.recv() {
+            match &packet.data {
+                OptIn(opt_in_data) => {
+                    let node_config = opt_in_node_config(&src_addr, &packet.header, opt_in_data);
+
+                    let mut state = self.state.write().await;
+                    let outer = state.discovered_nodes.entry(
+                        src_addr,
+                    ).or_insert( (||{
+                        info!("Node {} joined the network", src_addr);
+                        ForeignNode::new()
+                    })());
+                    outer.last_seen = timestamp_secs();
+                    let inner = outer.configs.entry(node_config.node_id).or_insert(node_config);
+                    *inner = node_config;
+                }
+
+                OptOut(_) => {
+                    let removed_node =
+                        self.state.write().await.discovered_nodes.remove(&src_addr);
+                    if removed_node.is_some() {
+                        warn!(
+                            "Node {} has opted out despite not being part of the network (anymore)",
+                            src_addr
+                        );
+                    } else {
+                        info!("Node {} has opted out of the network", src_addr);
+                    }
+                }
+                _ => todo!(),
+            };
+        }
     }
 }
 
-async fn listen(node: Node, socket: Arc<UdpSocket>) -> io::Result<()> {
+async fn listen(node: Node, socket: Arc<UdpSocket>, packet_sender: Sender<(Ipv4Addr, Packet)>) -> io::Result<()> {
     loop {
         let mut buffer = [0; 1024];
         match socket.recv_from(&mut buffer) {
             Ok((size, src)) => {
                 trace!("Received {} bytes from {}", size, src);
+                match Packet::deserialize_packet(&buffer) {
+                    Ok(packet) => {
+                        trace!("Received packet:");
+                        trace!("{:?}", packet);
+
+                        let src = match src {
+                            SocketAddr::V4(addr) => addr.ip().clone(),
+                            _ => unreachable!(),
+                        };
+                        match packet_sender.as_async().send((src, packet)).await {
+                            Ok(_) => {}
+                            Err(_) => {
+                                // no one is processing packets anymore, listening will stop
+                                return Ok(())
+                            },
+                        }
+                    },
+                    Err(e) => {
+                        error!("{:?}", e);
+                    },
+                }
             },
             Err(e) => {
                 error!("Network error: {}", e);
             },
         };
-
-        match Packet::deserialize_packet(&buffer) {
-            Ok(packet) => {
-                trace!("Received packet:");
-                trace!("{:?}", packet);
-            },
-            Err(e) => {
-                error!("{:?}", e);
-            },
-        }
     }
 }
+
 async fn broadcast(node: Node, broadcast_socket: Arc<UdpSocket>) {
     // TCNet spec requires opt in broadcast messages once per second
     let broadcast_addr = SocketAddr::V4(SocketAddrV4::new([255, 255, 255, 255].into(), 60_000));
@@ -137,13 +201,21 @@ async fn broadcast(node: Node, broadcast_socket: Arc<UdpSocket>) {
     }
 }
 
-pub fn timestamp() -> u32 {
+pub fn timestamp_micros() -> u32 {
     let start = SystemTime::now();
     let since_the_epoch = start
         .duration_since(UNIX_EPOCH)
         .expect("time should go forward");
     // tcnet's clock expects to be reset every second
     since_the_epoch.subsec_micros()
+}
+
+pub fn timestamp_secs() -> u64 {
+    let start = SystemTime::now();
+    let since_the_epoch = start
+        .duration_since(UNIX_EPOCH)
+        .expect("time should go forward");
+    since_the_epoch.as_secs()
 }
 
 fn management_header(node: &Node, message_type: u8, seq: u8) -> ManagementHeader{
@@ -155,9 +227,9 @@ fn management_header(node: &Node, message_type: u8, seq: u8) -> ManagementHeader
         message_type,
         mode_name: node.config.mode_name,
         seq,
-        node_type: node.config.node_type as u8,
+        node_type: node.config.node_type,
         node_options: node.config.node_options,
-        timestamp: timestamp(),
+        timestamp: timestamp_micros(),
     }
 }
 fn opt_in_packet(node: &Node, node_state: &DynamicNodeState, seq: u8) -> Result<Vec<u8>, DekuError> {

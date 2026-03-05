@@ -1,12 +1,15 @@
+use std::any::Any;
 use crate::tcnet_packet_serde::*;
 use deku::{DekuContainerRead, DekuError};
 use std::fmt::Debug;
+use std::net::Ipv4Addr;
 use log::debug;
+use crate::tcnet_node::NodeConfig;
 
 pub struct Packet
 {
-    header: ManagementHeader,
-    data: Data,
+    pub(crate) header: ManagementHeader,
+    pub(crate) data: Data,
 }
 
 #[derive(Debug)]
@@ -136,5 +139,25 @@ impl Packet {
 impl Debug for Packet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Packet\n {{ Header: {:?}\n\nData:\n {:?} }}", self.header, self.data)
+    }
+}
+
+pub fn opt_in_node_config(
+    src_address: &Ipv4Addr,
+    header: &ManagementHeader,
+    data: &OptInData
+) -> NodeConfig{
+    NodeConfig{
+        node_id: header.node_id,
+        node_type: header.node_type,
+        address: *src_address,
+        unicast_port: data.node_listener_port,
+        vendor_name: data.vendor_name,
+        application_name: data.application,
+        application_major_version: data.application_major_version,
+        application_minor_version: data.application_minor_version,
+        application_bug_version: data.application_bug_version,
+        mode_name: header.mode_name,
+        node_options: header.node_options,
     }
 }
