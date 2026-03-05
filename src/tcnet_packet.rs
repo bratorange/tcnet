@@ -3,7 +3,7 @@ use deku::{DekuContainerRead, DekuError};
 use std::fmt::Debug;
 use log::debug;
 
-pub struct Package
+pub struct Packet
 {
     header: ManagementHeader,
     data: Data,
@@ -16,14 +16,14 @@ pub enum SerdeError {
     MessageTypeNotImplemented,
 }
 
-impl Package {
-    pub fn deserialize_package(bytes: &[u8]) -> Result<Self, SerdeError> {
+impl Packet {
+    pub fn deserialize_packet(bytes: &[u8]) -> Result<Self, SerdeError> {
         let (remaining, header) = ManagementHeader::from_bytes((bytes, 0))
             .map_err(|x| SerdeError::InvalidHeader(x))?;
-        let package_type = header.message_type;
+        let packet_type = header.message_type;
 
         debug!("header: {:?}", header);
-        let data = match package_type {
+        let data = match packet_type {
             2 => {
                 let (_, inner) = OptInData::from_bytes(remaining)
                     .map_err(|x| SerdeError::InvalidData(x))?;
@@ -133,8 +133,8 @@ impl Package {
     }
 }
 
-impl Debug for Package {
+impl Debug for Packet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Package\n {{ Header: {:?}\n\nData:\n {:?} }}", self.header, self.data)
+        write!(f, "Packet\n {{ Header: {:?}\n\nData:\n {:?} }}", self.header, self.data)
     }
 }

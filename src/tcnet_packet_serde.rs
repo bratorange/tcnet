@@ -125,7 +125,7 @@ pub struct OptInData{
     pub _reserved1: ReservedData<1>,                // RESERVED
 }
 
-// TODO Opt-Out package
+// TODO Opt-Out packet
 
 #[derive(Debug, PartialEq, DekuRead, DekuWrite)]
 #[deku(id_type = "u8")]

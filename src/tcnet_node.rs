@@ -1,16 +1,14 @@
-use std::{io, thread};
+use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::sync::Arc;
-use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use deku::{DekuContainerWrite, DekuError, DekuRead, DekuWrite};
-use deku::writer::Writer;
 use log::{error, trace};
 use tokio::runtime::{Builder, Runtime};
 use tokio::sync::RwLock;
 use tokio::time::interval;
 use crate::into_ascii;
-use crate::tcnet_package::Package;
+use crate::tcnet_packet::Packet;
 use crate::tcnet_packet_serde::{AsciiString, ManagementHeader, NodeId, NodeOptions, NodeType, OptInData};
 
 #[derive(Debug, Default)]
@@ -42,7 +40,7 @@ impl Default for NodeConfig{
             node_id: 0,
             node_type: NodeType::Auto,
             address: Ipv4Addr::new(0, 0, 0, 0),
-            unicast_port: 60_011,
+            unicast_port: 65_023,
             vendor_name: into_ascii!("Somevendor______"),
             application_name: into_ascii!("Someapplication_"),
             application_major_version: 0,
@@ -101,10 +99,10 @@ async fn listen_for_broadcast(node: Node, socket: Arc<UdpSocket>) -> io::Result<
             },
         };
 
-        match Package::deserialize_package(&buffer) {
-            Ok(package) => {
-                trace!("Received package:");
-                trace!("{:?}", package);
+        match Packet::deserialize_packet(&buffer) {
+            Ok(packet) => {
+                trace!("Received packet:");
+                trace!("{:?}", packet);
             },
             Err(e) => {
                 error!("{:?}", e);
@@ -126,7 +124,16 @@ async fn broadcast(node: Node, broadcast_socket: Arc<UdpSocket>) {
     }
 }
 
-fn management_header(node: &Node, node_state: &DynamicNodeState, message_type: u8, seq: u8) -> ManagementHeader{
+pub fn timestamp() -> u32 {
+    let start = SystemTime::now();
+    let since_the_epoch = start
+        .duration_since(UNIX_EPOCH)
+        .expect("time should go forward");
+    // tcnet's clock expects to be reset every second
+    since_the_epoch.subsec_micros()
+}
+
+fn management_header(node: &Node, message_type: u8, seq: u8) -> ManagementHeader{
     ManagementHeader{
         node_id: node.config.node_id,
         protocol_version_major: 3,
@@ -137,11 +144,11 @@ fn management_header(node: &Node, node_state: &DynamicNodeState, message_type: u
         seq,
         node_type: node.config.node_type as u8,
         node_options: node.config.node_options,
-        timestamp: node_state.timestamp,
+        timestamp: timestamp(),
     }
 }
 fn opt_in_packet(node: &Node, node_state: &DynamicNodeState, seq: u8) -> Result<Vec<u8>, DekuError> {
-    let header = management_header(node, node_state, 2, seq);
+    let header = management_header(node, 2, seq);
     let data = OptInData{
         node_count: node_state.discovered_nodes.len() as u16,
         node_listener_port: node.config.unicast_port,
