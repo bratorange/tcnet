@@ -1,10 +1,9 @@
+use crate::node::application::{Application, ApplicationNode};
+use crate::node::{start_node, Dispatcher, DynamicNodeState};
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 use tokio::sync::RwLock;
-use crate::node::{start_node, DynamicNodeState, Dispatcher, ApplicationConfig};
-use crate::node::application::ApplicationNode;
-use crate::node::tcnet_packet_serde::{Data, ManagementHeader, NodeName, NodeType};
 
 pub mod node;
 
@@ -24,22 +23,22 @@ impl TCNetClient{
             .enable_all()
             .build().expect("Could not start tokio runtime");
 
-        let mut node = Arc::new(Dispatcher {
-            config: ApplicationConfig::default(),
+        let dispatcher = Arc::new(Dispatcher {
+            application_nodes: Arc::new(RwLock::default()),
+            unicast_port: 65_023,
             bind_address,
             state: Arc::new(RwLock::new(DynamicNodeState::default())),
         });
 
-        runtime.spawn(start_node(node.clone()));
-        Self{runtime, node}
+        runtime.spawn(start_node(dispatcher.clone()));
+        Self{runtime, node: dispatcher }
     }
     pub async fn add_application(
         &self,
-        node_name: NodeName,
-        node_type: NodeType,
-        
-        incoming_handler: Box<dyn Fn(ManagementHeader, Data)>
-    ) -> ApplicationNode {
-        ApplicationNode { node: self.node.clone(), config: self.node.config.clone(), incoming_handler }
+        application_config: node::ApplicationConfig,
+        application: Box<dyn Application + Send + Sync>,
+    ) {
+        let application_node = ApplicationNode { dispatcher: self.node.clone(), config: application_config, application };
+        self.node.application_nodes.write().await.insert(application_node.config.node_id, application_node);
     }
 }

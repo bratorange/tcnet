@@ -153,7 +153,7 @@ pub fn opt_in_node_config(
         application_major_version: data.application_major_version,
         application_minor_version: data.application_minor_version,
         application_bug_version: data.application_bug_version,
-        mode_name: header.node_name,
+        node_name: header.node_name,
         node_options: header.node_options,
     }
 }
