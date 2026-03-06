@@ -1,9 +1,8 @@
 use crate::into_ascii;
-use crate::tcnet_packet::{opt_in_node_config, Packet};
-use crate::tcnet_packet_serde::Data::{OptIn, OptOut};
-use crate::tcnet_packet_serde::{AsciiString, ManagementHeader, NodeId, NodeOptions, NodeType, OptInData};
+use crate::node::tcnet_packet::{opt_in_node_config, Packet};
+use crate::node::tcnet_packet_serde::Data::{OptIn, OptOut};
+use crate::node::tcnet_packet_serde::{AsciiString, ManagementHeader, NodeId, NodeOptions, NodeType, OptInData};
 use deku::{DekuContainerWrite, DekuError};
-use kanal::{Receiver, Sender};
 use log::{error, info, trace, warn};
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -16,6 +15,9 @@ use tokio::runtime::{Builder, Runtime};
 use tokio::spawn;
 use tokio::sync::RwLock;
 use tokio::time::interval;
+pub(crate) mod tcnet_packet_serde;
+pub(crate) mod tcnet_packet;
+
 
 #[derive(Clone)]
 pub(crate) struct ForeignNode {

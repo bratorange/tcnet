@@ -2,7 +2,7 @@ use clap::Parser;
 use std::net::Ipv4Addr;
 use std::thread::sleep;
 use std::time::Duration;
-use tcnet::tcnet_node::Node;
+use tcnet::node::Node;
 
 #[derive(Parser)]
 struct Args {

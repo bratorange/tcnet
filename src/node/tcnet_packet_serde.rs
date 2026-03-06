@@ -77,7 +77,7 @@ pub struct AsciiString<const N: usize>(pub [u8; N]);
 #[macro_export]
 macro_rules! into_ascii {
     ($str:literal) => {{
-        use crate::tcnet_packet_serde::AsciiString;
+        use crate::node::tcnet_packet_serde::AsciiString;
         const N: usize = $str.len();
         let mut arr: [u8; N] = [0; N];
         arr[..N].copy_from_slice($str.as_bytes());
