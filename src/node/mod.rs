@@ -78,64 +78,44 @@ pub struct Node {
     pub(crate) state: Arc<RwLock<DynamicNodeState>>,
 }
 
-impl Node {
-    pub fn start(bind_address: Ipv4Addr) -> Runtime {
-        let rt = Builder::new_multi_thread()
-            .worker_threads(1)
-            .thread_name("tcnet")
-            .enable_all()
-            .build().expect("Could not start tokio runtime");
+pub async fn start_node(node: Arc<Node>) {
+    trace!("binding sockets...");
+    let broadcast_socket_addr = SocketAddr::new(node.bind_address.into(), 60_000);
+    let broadcast_socket = Arc::new(UdpSocket::bind(broadcast_socket_addr).await
+        .expect("Could not bind to socket 60000"));
+    broadcast_socket.set_broadcast(true)
+        .expect("Could not enable socket 60000 for broadcasting");
 
-        rt.spawn(Self::run(bind_address));
-        rt
-    }
+    let time_broadcast_addr = SocketAddr::new(node.bind_address.into(), 60_001);
+    let time_broadcast_socket = Arc::new(UdpSocket::bind(time_broadcast_addr).await
+        .expect("Could not bind to socket 60001"));
+    time_broadcast_socket.set_broadcast(true)
+        .expect("Could not enable socket 60001 for broadcasting");
 
-    async fn run(bind_address: Ipv4Addr) {
-        // create prototypical node for test purposes
-        let mut node = Self {
-            config: NodeConfig::default(),
-            bind_address,
-            state: Arc::new(RwLock::new(DynamicNodeState::default())),
-        };
+    // The spec requires also listening on this port. However, there is no special use case
+    // declared for it.
+    let broadcast_socket_addr2 = SocketAddr::new(node.bind_address.into(), 60_002);
+    let broadcast_socket2 = Arc::new(UdpSocket::bind(broadcast_socket_addr2).await
+        .expect("Could not bind to broadcast socket 60002"));
+    broadcast_socket2.set_broadcast(true)
+        .expect("Could not enable socket 60002 for broadcasting");
 
-        trace!("binding sockets...");
-        let broadcast_socket_addr = SocketAddr::new(bind_address.into(), 60_000);
-        let broadcast_socket = Arc::new(UdpSocket::bind(broadcast_socket_addr).await
-            .expect("Could not bind to socket 60000"));
-        broadcast_socket.set_broadcast(true)
-            .expect("Could not enable socket 60000 for broadcasting");
+    let unicast_socket_addr = SocketAddr::new(node.bind_address.into(), node.config.unicast_port);
+    let unicast_socket = Arc::new(UdpSocket::bind(unicast_socket_addr).await
+        .expect("Could not bind to unicast socket")
+    );
 
-        let time_broadcast_addr = SocketAddr::new(bind_address.into(), 60_001);
-        let time_broadcast_socket = Arc::new(UdpSocket::bind(time_broadcast_addr).await
-            .expect("Could not bind to socket 60001"));
-        time_broadcast_socket.set_broadcast(true)
-            .expect("Could not enable socket 60001 for broadcasting");
+    trace!("Starting network processing");
 
-        // The spec requires also listening on this port. However, there is no special use case
-        // declared for it.
-        let broadcast_socket_addr2 = SocketAddr::new(bind_address.into(), 60_002);
-        let broadcast_socket2 = Arc::new(UdpSocket::bind(broadcast_socket_addr2).await
-            .expect("Could not bind to broadcast socket 60002"));
-        broadcast_socket2.set_broadcast(true)
-            .expect("Could not enable socket 60002 for broadcasting");
-
-        let unicast_socket_addr = SocketAddr::new(bind_address.into(), node.config.unicast_port);
-        let unicast_socket = Arc::new(UdpSocket::bind(unicast_socket_addr).await
-            .expect("Could not bind to unicast socket")
-        );
-
-        trace!("Starting network processing");
-
-        spawn(broadcast(node.clone(), broadcast_socket.clone()));
-        spawn(listen(node.clone(), broadcast_socket.clone()));
-        spawn(listen(node.clone(), broadcast_socket2.clone()));
-        spawn(listen(node.clone(), time_broadcast_socket.clone()));
-        spawn(listen(node.clone(), unicast_socket.clone()));
-        spawn(timeout_foreign_nodes(node.clone()));
-    }
+    spawn(broadcast(node.clone(), broadcast_socket.clone()));
+    spawn(listen(node.clone(), broadcast_socket.clone()));
+    spawn(listen(node.clone(), broadcast_socket2.clone()));
+    spawn(listen(node.clone(), time_broadcast_socket.clone()));
+    spawn(listen(node.clone(), unicast_socket.clone()));
+    spawn(timeout_foreign_nodes(node.clone()));
 }
 
-async fn listen(node: Node, socket: Arc<UdpSocket>) -> io::Result<()> {
+async fn listen(node: Arc<Node>, socket: Arc<UdpSocket>) -> io::Result<()> {
     let mut buffer = [0; 1024];
     info!("Start Listening for packets on {}", socket.local_addr()?);
     loop {
@@ -191,7 +171,7 @@ async fn listen(node: Node, socket: Arc<UdpSocket>) -> io::Result<()> {
     }
 }
 
-async fn broadcast(node: Node, broadcast_socket: Arc<UdpSocket>) {
+async fn broadcast(node: Arc<Node>, broadcast_socket: Arc<UdpSocket>) {
     // TCNet spec requires opt in broadcast messages once per second
     // TODO only send to the broadcast address of bind addr
     let ipv4_addrs = best_local_ipv4_addrs()
@@ -220,7 +200,7 @@ async fn broadcast(node: Node, broadcast_socket: Arc<UdpSocket>) {
     }
 }
 
-async fn timeout_foreign_nodes(node: Node){
+async fn timeout_foreign_nodes(node: Arc<Node>){
     let mut interval = interval(Duration::from_secs(1));
     loop {
         let secs = timestamp_secs();

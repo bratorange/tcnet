@@ -1,7 +1,7 @@
 use crate::node::tcnet_packet_serde::*;
 use deku::{DekuContainerRead, DekuError};
 use std::fmt::Debug;
-use log::debug;
+use log::trace;
 use crate::node::NodeConfig;
 
 pub struct Packet
@@ -23,7 +23,7 @@ impl Packet {
             .map_err(|x| SerdeError::InvalidHeader(x))?;
         let packet_type = header.message_type;
 
-        debug!("header: {:?}", header);
+        trace!("header: {:?}", header);
         let data = match packet_type {
             2 => {
                 let (_, inner) = OptInData::from_bytes(remaining)
