@@ -21,12 +21,12 @@ use tokio::time::interval;
 pub(crate) struct ForeignNode {
     pub last_seen: u64,
     pub address: Ipv4Addr,
-    pub configs: HashMap<NodeId, NodeConfig>
+    pub applications: HashMap<NodeId, NodeConfig>
 }
 
 impl ForeignNode {
     fn new(address: Ipv4Addr) -> Self {
-        Self { last_seen: 0, address, configs: HashMap::new(), }
+        Self { last_seen: 0, address, applications: HashMap::new(), }
     }
 }
 
@@ -34,6 +34,7 @@ impl ForeignNode {
 pub(crate) struct DynamicNodeState {
     pub discovered_nodes: HashMap<Ipv4Addr, ForeignNode>,
     pub uptime: u16,
+    pub current_seq: u8,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -157,7 +158,7 @@ async fn listen(node: Node, socket: Arc<UdpSocket>) -> io::Result<()> {
                                     src_addr,
                                 ).or_insert(ForeignNode::new(src_addr));
                                 outer.last_seen = timestamp_secs();
-                                let inner = outer.configs.entry(node_config.node_id).or_insert(node_config);
+                                let inner = outer.applications.entry(node_config.node_id).or_insert(node_config);
                                 *inner = node_config;
                             }
 
@@ -201,8 +202,10 @@ async fn broadcast(node: Node, broadcast_socket: Arc<UdpSocket>) {
         interval.tick().await;
         trace!("Sending opt in packet...");
         let payload = {
-            let node_state = node.state.read().await;
-            opt_in_packet(&node, &node_state, 0)
+            let mut node_state = node.state.write().await;
+            let seq = node_state.current_seq;
+            node_state.current_seq += 1;
+            opt_in_packet(&node, &node_state, seq)
                 .expect("TCNet: Could not serialize opt in packet")
         };
         for addr in &ipv4_addrs {
