@@ -5,11 +5,12 @@ use crate::tcnet_packet_serde::{AsciiString, ManagementHeader, NodeId, NodeOptio
 use deku::{DekuContainerWrite, DekuError};
 use kanal::{Receiver, Sender};
 use log::{error, info, trace, warn};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use getifs::best_local_ipv4_addrs;
 use tokio::net::UdpSocket;
 use tokio::runtime::{Builder, Runtime};
 use tokio::spawn;
@@ -18,13 +19,14 @@ use tokio::time::interval;
 
 #[derive(Clone)]
 pub(crate) struct ForeignNode {
-    last_seen: u64,
-    configs: HashMap<NodeId, NodeConfig>
+    pub last_seen: u64,
+    pub address: Ipv4Addr,
+    pub configs: HashMap<NodeId, NodeConfig>
 }
 
 impl ForeignNode {
-    fn new() -> Self {
-        Self { last_seen: 0, configs: HashMap::new(), }
+    fn new(address: Ipv4Addr) -> Self {
+        Self { last_seen: 0, address, configs: HashMap::new(), }
     }
 }
 
@@ -38,7 +40,6 @@ pub(crate) struct DynamicNodeState {
 pub(crate) struct NodeConfig {
     pub node_id: NodeId,
     pub node_type: NodeType,
-    pub address: Ipv4Addr,
     pub unicast_port: u16,
     pub vendor_name: AsciiString<16>,
     pub application_name: AsciiString<16>,
@@ -55,7 +56,6 @@ impl Default for NodeConfig{
         Self{
             node_id: 0,
             node_type: NodeType::Auto,
-            address: Ipv4Addr::new(0, 0, 0, 0),
             unicast_port: 65_023,
             vendor_name: into_ascii!("Somevendor______"),
             application_name: into_ascii!("Someapplication_"),
@@ -71,6 +71,7 @@ impl Default for NodeConfig{
 #[derive(Clone)]
 pub struct Node {
     pub(crate) config: NodeConfig,
+    pub(crate) bind_address: Ipv4Addr,
     pub(crate) state: Arc<RwLock<DynamicNodeState>>,
 }
 
@@ -90,18 +91,18 @@ impl Node {
         // create prototypical node for test purposes
         let mut node = Self {
             config: NodeConfig::default(),
+            bind_address,
             state: Arc::new(RwLock::new(DynamicNodeState::default())),
         };
-        node.config.address = bind_address;
 
         trace!("binding sockets...");
-        let broadcast_socket_addr = SocketAddr::new(node.config.address.into(), 60_000);
+        let broadcast_socket_addr = SocketAddr::new(bind_address.into(), 60_000);
         let broadcast_socket = Arc::new(UdpSocket::bind(broadcast_socket_addr).await
             .expect("Could not bind to socket 60000"));
         broadcast_socket.set_broadcast(true)
             .expect("Could not enable socket 60000 for broadcasting");
 
-        let time_broadcast_addr = SocketAddr::new(node.config.address.into(), 60_001);
+        let time_broadcast_addr = SocketAddr::new(bind_address.into(), 60_001);
         let time_broadcast_socket = Arc::new(UdpSocket::bind(time_broadcast_addr).await
             .expect("Could not bind to socket 60001"));
         time_broadcast_socket.set_broadcast(true)
@@ -109,13 +110,13 @@ impl Node {
 
         // The spec requires also listening on this port. However, there is no special use case
         // declared for it.
-        let broadcast_socket_addr2 = SocketAddr::new(node.config.address.into(), 60_002);
+        let broadcast_socket_addr2 = SocketAddr::new(bind_address.into(), 60_002);
         let broadcast_socket2 = Arc::new(UdpSocket::bind(broadcast_socket_addr2).await
             .expect("Could not bind to broadcast socket 60002"));
         broadcast_socket2.set_broadcast(true)
             .expect("Could not enable socket 60002 for broadcasting");
 
-        let unicast_socket_addr = SocketAddr::new(node.config.address.into(), node.config.unicast_port);
+        let unicast_socket_addr = SocketAddr::new(bind_address.into(), node.config.unicast_port);
         let unicast_socket = Arc::new(UdpSocket::bind(unicast_socket_addr).await
             .expect("Could not bind to unicast socket")
         );
@@ -127,6 +128,7 @@ impl Node {
         spawn(listen(node.clone(), broadcast_socket2.clone()));
         spawn(listen(node.clone(), time_broadcast_socket.clone()));
         spawn(listen(node.clone(), unicast_socket.clone()));
+        spawn(timeout_foreign_nodes(node.clone()));
     }
 }
 
@@ -148,15 +150,12 @@ async fn listen(node: Node, socket: Arc<UdpSocket>) -> io::Result<()> {
                         };
                         match &packet.data {
                             OptIn(opt_in_data) => {
-                                let node_config = opt_in_node_config(&src_addr, &packet.header, opt_in_data);
+                                let node_config = opt_in_node_config(&packet.header, opt_in_data);
 
                                 let mut state = node.state.write().await;
                                 let outer = state.discovered_nodes.entry(
                                     src_addr,
-                                ).or_insert( (||{
-                                    info!("Node {} joined the network", src_addr);
-                                    ForeignNode::new()
-                                })());
+                                ).or_insert(ForeignNode::new(src_addr));
                                 outer.last_seen = timestamp_secs();
                                 let inner = outer.configs.entry(node_config.node_id).or_insert(node_config);
                                 *inner = node_config;
@@ -191,15 +190,42 @@ async fn listen(node: Node, socket: Arc<UdpSocket>) -> io::Result<()> {
 
 async fn broadcast(node: Node, broadcast_socket: Arc<UdpSocket>) {
     // TCNet spec requires opt in broadcast messages once per second
-    let broadcast_addr = SocketAddr::V4(SocketAddrV4::new([255, 255, 255, 255].into(), 60_000));
+    // TODO only send to the broadcast address of bind addr
+    let ipv4_addrs = best_local_ipv4_addrs()
+        .expect("Could not get local IPv4 addresses")
+        .iter().map(|net| SocketAddr::V4(SocketAddrV4::new(net.broadcast(), 60_000)))
+        .collect::<HashSet<_>>();
+    trace!("Broadcasting opt in packets to {:?}", ipv4_addrs);
     let mut interval = interval(Duration::from_secs(1));
     loop {
+        interval.tick().await;
         trace!("Sending opt in packet...");
-        let node_state = node.state.read().await;
-        let payload = opt_in_packet(&node, &node_state, 0)
-            .expect("TCNet: Could not serialize opt in packet");
-        let _ = broadcast_socket.send_to(&payload, broadcast_addr).await;
+        let payload = {
+            let node_state = node.state.read().await;
+            opt_in_packet(&node, &node_state, 0)
+                .expect("TCNet: Could not serialize opt in packet")
+        };
+        for addr in &ipv4_addrs {
+            let _ = broadcast_socket.send_to(&payload, addr).await;
+        }
+
+        // TODO unicast opt in
+
         trace!("Sent opt in packet");
+    }
+}
+
+async fn timeout_foreign_nodes(node: Node){
+    let mut interval = interval(Duration::from_secs(1));
+    loop {
+        let secs = timestamp_secs();
+        node.state.write().await.discovered_nodes.retain(|_, foreign_node| {
+            let keep = foreign_node.last_seen + 10 > secs;
+            if !keep {
+                warn!("Node {} timed out", foreign_node.address);
+            }
+            keep
+        });
         interval.tick().await;
     }
 }

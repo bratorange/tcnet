@@ -143,14 +143,12 @@ impl Debug for Packet {
 }
 
 pub fn opt_in_node_config(
-    src_address: &Ipv4Addr,
     header: &ManagementHeader,
     data: &OptInData
 ) -> NodeConfig{
     NodeConfig{
         node_id: header.node_id,
         node_type: header.node_type,
-        address: *src_address,
         unicast_port: data.node_listener_port,
         vendor_name: data.vendor_name,
         application_name: data.application,
