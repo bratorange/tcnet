@@ -2,7 +2,7 @@ use crate::node::tcnet_packet_serde::*;
 use deku::{DekuContainerRead, DekuError};
 use std::fmt::Debug;
 use log::trace;
-use crate::node::NodeConfig;
+use crate::node::ApplicationConfig;
 
 pub struct Packet
 {
@@ -143,8 +143,8 @@ impl Debug for Packet {
 pub fn opt_in_node_config(
     header: &ManagementHeader,
     data: &OptInData
-) -> NodeConfig{
-    NodeConfig{
+) -> ApplicationConfig {
+    ApplicationConfig {
         node_id: header.node_id,
         node_type: header.node_type,
         unicast_port: data.node_listener_port,
@@ -153,7 +153,7 @@ pub fn opt_in_node_config(
         application_major_version: data.application_major_version,
         application_minor_version: data.application_minor_version,
         application_bug_version: data.application_bug_version,
-        mode_name: header.mode_name,
+        mode_name: header.node_name,
         node_options: header.node_options,
     }
 }

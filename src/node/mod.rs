@@ -1,7 +1,7 @@
 use crate::into_ascii;
 use crate::node::tcnet_packet::{opt_in_node_config, Packet};
 use crate::node::tcnet_packet_serde::Data::{OptIn, OptOut};
-use crate::node::tcnet_packet_serde::{AsciiString, ManagementHeader, NodeId, NodeOptions, NodeType, OptInData};
+use crate::node::tcnet_packet_serde::{AsciiString, Data, ManagementHeader, NodeId, NodeOptions, NodeType, OptInData};
 use deku::{DekuContainerWrite, DekuError};
 use log::{error, info, trace, warn};
 use std::collections::{HashMap, HashSet};
@@ -15,15 +15,17 @@ use tokio::runtime::{Builder, Runtime};
 use tokio::spawn;
 use tokio::sync::RwLock;
 use tokio::time::interval;
+use crate::node::application::ApplicationNode;
+
 pub(crate) mod tcnet_packet_serde;
 pub(crate) mod tcnet_packet;
-
+pub mod application;
 
 #[derive(Clone)]
 pub(crate) struct ForeignNode {
     pub last_seen: u64,
     pub address: Ipv4Addr,
-    pub applications: HashMap<NodeId, NodeConfig>
+    pub applications: HashMap<NodeId, ApplicationConfig>
 }
 
 impl ForeignNode {
@@ -40,7 +42,7 @@ pub(crate) struct DynamicNodeState {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct NodeConfig {
+pub(crate) struct ApplicationConfig {
     pub node_id: NodeId,
     pub node_type: NodeType,
     pub unicast_port: u16,
@@ -54,7 +56,7 @@ pub(crate) struct NodeConfig {
 }
 
 // TODO dont use Default here
-impl Default for NodeConfig{
+impl Default for ApplicationConfig {
     fn default() -> Self {
         Self{
             node_id: 0,
@@ -72,13 +74,17 @@ impl Default for NodeConfig{
 }
 
 #[derive(Clone)]
-pub struct Node {
-    pub(crate) config: NodeConfig,
+pub struct Dispatcher {
+    pub(crate) config: ApplicationConfig,
     pub(crate) bind_address: Ipv4Addr,
     pub(crate) state: Arc<RwLock<DynamicNodeState>>,
 }
 
-pub async fn start_node(node: Arc<Node>) {
+pub fn send_message(application: &ApplicationNode, address: Ipv4Addr, node_id: NodeId, data: Data){
+    todo!()
+}
+
+pub async fn start_node(node: Arc<Dispatcher>) {
     trace!("binding sockets...");
     let broadcast_socket_addr = SocketAddr::new(node.bind_address.into(), 60_000);
     let broadcast_socket = Arc::new(UdpSocket::bind(broadcast_socket_addr).await
@@ -115,7 +121,7 @@ pub async fn start_node(node: Arc<Node>) {
     spawn(timeout_foreign_nodes(node.clone()));
 }
 
-async fn listen(node: Arc<Node>, socket: Arc<UdpSocket>) -> io::Result<()> {
+async fn listen(node: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Result<()> {
     let mut buffer = [0; 1024];
     info!("Start Listening for packets on {}", socket.local_addr()?);
     loop {
@@ -171,7 +177,7 @@ async fn listen(node: Arc<Node>, socket: Arc<UdpSocket>) -> io::Result<()> {
     }
 }
 
-async fn broadcast(node: Arc<Node>, broadcast_socket: Arc<UdpSocket>) {
+async fn broadcast(node: Arc<Dispatcher>, broadcast_socket: Arc<UdpSocket>) {
     // TCNet spec requires opt in broadcast messages once per second
     // TODO only send to the broadcast address of bind addr
     let ipv4_addrs = best_local_ipv4_addrs()
@@ -200,7 +206,7 @@ async fn broadcast(node: Arc<Node>, broadcast_socket: Arc<UdpSocket>) {
     }
 }
 
-async fn timeout_foreign_nodes(node: Arc<Node>){
+async fn timeout_foreign_nodes(node: Arc<Dispatcher>){
     let mut interval = interval(Duration::from_secs(1));
     loop {
         let secs = timestamp_secs();
@@ -232,21 +238,21 @@ pub fn timestamp_secs() -> u64 {
     since_the_epoch.as_secs()
 }
 
-fn management_header(node: &Node, message_type: u8, seq: u8) -> ManagementHeader{
+fn management_header(node: &Dispatcher, message_type: u8, seq: u8) -> ManagementHeader{
     ManagementHeader{
         node_id: node.config.node_id,
         protocol_version_major: 3,
         protocol_version_minor: 6,
         _header: into_ascii!("TCN"),
         message_type,
-        mode_name: node.config.mode_name,
+        node_name: node.config.mode_name,
         seq,
         node_type: node.config.node_type,
         node_options: node.config.node_options,
         timestamp: timestamp_micros(),
     }
 }
-fn opt_in_packet(node: &Node, node_state: &DynamicNodeState, seq: u8) -> Result<Vec<u8>, DekuError> {
+fn opt_in_packet(node: &Dispatcher, node_state: &DynamicNodeState, seq: u8) -> Result<Vec<u8>, DekuError> {
     let header = management_header(node, 2, seq);
     let data = OptInData{
         node_count: node_state.discovered_nodes.len() as u16,

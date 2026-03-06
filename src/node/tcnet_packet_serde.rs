@@ -37,6 +37,7 @@ impl DekuReader<'_> for NodeOptions {
 }
 
 pub type Timestamp = u32; // timestamp in microseconds
+pub type NodeName = AsciiString<8>;
 
 #[derive(PartialEq, DekuWrite, DekuRead)]
 pub struct ReservedData<const N: usize>(pub [u8; N]);
@@ -104,7 +105,7 @@ pub struct ManagementHeader {
     pub protocol_version_minor: u8,
     pub _header: AsciiString<3>, // this just here for serde purposes and must allways be "TCN"
     pub message_type: u8,
-    pub mode_name: AsciiString<8>,
+    pub node_name: NodeName,
     pub seq: u8,
     pub node_type: NodeType,
     pub node_options: NodeOptions,
@@ -116,13 +117,13 @@ pub struct OptInData{
     pub node_count: u16, // Amount of Registered Node
     pub node_listener_port: u16,            // Listener Port for Unicast Messages
     pub uptime: u16,                        // Uptime of Node in SEC
-    pub _reserved0: ReservedData<2>,                // RESERVED
-    pub vendor_name: AsciiString<16>,              // Vendor
-    pub application: AsciiString<16>,              // Application / Device Name
+    pub _reserved0: ReservedData<2>,        // RESERVED
+    pub vendor_name: AsciiString<16>,       // Vendor
+    pub application: AsciiString<16>,       // Application / Device Name
     pub application_major_version: u8,      // Application/Device Major Version
     pub application_minor_version: u8,      // Application/Device Minor Version
     pub application_bug_version: u8,        // Application/Device Minor Version
-    pub _reserved1: ReservedData<1>,                // RESERVED
+    pub _reserved1: ReservedData<1>,        // RESERVED
 }
 
 // TODO Opt-Out packet
