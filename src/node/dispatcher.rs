@@ -133,7 +133,7 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
 }
 
 pub async fn add_application(
-    dispatcher: &Arc<Dispatcher>,
+    dispatcher: Arc<Dispatcher>,
     application_config: ApplicationConfig,
 ) -> (Receiver<ApplicationMessage>, kanal::Sender<ApplicationMessage>) {
     let (incoming_tx, incoming_rx) = kanal::bounded(100);

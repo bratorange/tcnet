@@ -32,7 +32,7 @@ pub struct ApplicationConfig {
     pub application_bug_version: u8,
     pub node_name: AsciiString<8>,
     pub node_options: NodeOptions,
-    pub unicast_port: u16, // only used for foreign nodes
+    pub unicast_port: u16, // TODO: only used for foreign nodes, make this more coherent
 }
 
 // TODO dont use Default here
