@@ -1,11 +1,12 @@
-use crate::node::application::{Application, ApplicationNode};
 use crate::node::{start_node, Dispatcher, DynamicNodeState};
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 use tokio::sync::RwLock;
+use crate::application::{Application, ApplicationNode};
 
 pub mod node;
+mod application;
 
 const SPEC_MAJOR_VERSION: u8 = 3;
 const SPEC_MINOR_VERSION: u8 = 6;

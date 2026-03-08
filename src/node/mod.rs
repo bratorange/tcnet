@@ -14,11 +14,10 @@ use tokio::net::UdpSocket;
 use tokio::spawn;
 use tokio::sync::RwLock;
 use tokio::time::interval;
-use crate::node::application::ApplicationNode;
+use crate::application::ApplicationNode;
 
 pub(crate) mod tcnet_packet_serde;
 pub(crate) mod tcnet_packet;
-pub mod application;
 
 #[derive(Clone)]
 pub(crate) struct ForeignNode {
