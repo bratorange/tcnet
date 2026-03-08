@@ -1,8 +1,10 @@
 use crate::node::tcnet_packet_serde::*;
-use deku::{DekuContainerRead, DekuError};
+use deku::{DekuContainerRead, DekuContainerWrite, DekuError};
 use std::fmt::Debug;
 use log::trace;
-use crate::node::ApplicationConfig;
+use crate::into_ascii;
+use crate::node::{ApplicationConfig, DynamicNodeState};
+use crate::node::dispatcher::timestamp_micros;
 
 pub struct Packet
 {
@@ -140,7 +142,7 @@ impl Debug for Packet {
     }
 }
 
-pub fn opt_in_node_config(
+pub(crate) fn opt_in_node_config(
     header: &ManagementHeader,
     data: &OptInData
 ) -> ApplicationConfig {
@@ -156,4 +158,38 @@ pub fn opt_in_node_config(
         node_name: header.node_name,
         node_options: header.node_options,
     }
+}
+
+pub(crate) fn management_header(app_config: &ApplicationConfig, message_type: u8, seq: u8) -> ManagementHeader{
+    ManagementHeader{
+        node_id: app_config.node_id,
+        protocol_version_major: 3,
+        protocol_version_minor: 6,
+        _header: into_ascii!("TCN"),
+        message_type,
+        node_name: app_config.node_name,
+        seq,
+        node_type: app_config.node_type,
+        node_options: app_config.node_options,
+        timestamp: timestamp_micros(),
+    }
+}
+
+pub(crate) fn opt_in_packet(app_config: &ApplicationConfig, node_state: &DynamicNodeState, seq: u8) -> Result<Vec<u8>, DekuError> {
+    let header = management_header(app_config, 2, seq);
+    let data = OptInData{
+        node_count: node_state.discovered_nodes.len() as u16,
+        node_listener_port: app_config.unicast_port,
+        uptime: node_state.uptime,
+        _reserved0: Default::default(),
+        vendor_name: app_config.vendor_name,
+        application: app_config.application_name,
+        application_major_version: app_config.application_major_version,
+        application_minor_version: app_config.application_minor_version,
+        application_bug_version: app_config.application_bug_version,
+        _reserved1: Default::default(),
+    };
+    let ret = [header.to_bytes()?, data.to_bytes()?].concat();
+    debug_assert!(ret.len() == 68);
+    Ok(ret)
 }

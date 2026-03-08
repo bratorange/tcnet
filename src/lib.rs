@@ -1,11 +1,9 @@
-use crate::application::{ApplicationMessage, ApplicationNode};
-use crate::node::tcnet_packet_serde::Data;
-use crate::node::{start_node, Dispatcher, DynamicNodeState};
-use kanal::Receiver;
+use crate::node::DynamicNodeState;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 use tokio::sync::RwLock;
+use node::dispatcher::{start_node, Dispatcher};
 
 pub mod node;
 mod application;
@@ -15,7 +13,7 @@ const SPEC_MINOR_VERSION: u8 = 6;
 
 pub struct TCNetClient{
     runtime: Runtime,
-    node: Arc<Dispatcher>,
+    dispatcher: Arc<Dispatcher>,
 }
 
 impl TCNetClient{
@@ -34,16 +32,6 @@ impl TCNetClient{
         });
 
         runtime.spawn(start_node(dispatcher.clone()));
-        Self{runtime, node: dispatcher }
-    }
-    pub async fn add_application(
-        &self,
-        application_config: node::ApplicationConfig,
-    ) -> (Receiver<ApplicationMessage>, kanal::Sender<ApplicationMessage>) {
-        let (incoming_tx, incoming_rx) = kanal::bounded(100);
-        let (outgoing_tx, outgoing_rx) = kanal::bounded(100);
-        let application_node = ApplicationNode { dispatcher: self.node.clone(), config: application_config, incoming_tx, outgoing_rx };
-        self.node.application_nodes.write().await.insert(application_node.config.node_id, application_node);
-        (incoming_rx, outgoing_tx)
+        Self{runtime, dispatcher: dispatcher }
     }
 }
