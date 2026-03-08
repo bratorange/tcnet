@@ -1,5 +1,4 @@
-use crate::application::Application;
-use crate::node::tcnet_packet_serde::{AsciiString, Data, ManagementHeader};
+use crate::node::tcnet_packet_serde::AsciiString;
 
 pub struct Layer{
     source: u8,
@@ -17,19 +16,12 @@ pub struct DJControllerView {
     status: ControllerStatus,
 }
 
-impl Application for DJControllerView {
-    fn handle_message(&self, header: &ManagementHeader, data: &Data) {
-        match data {
-            Data::Status(data) => {}
-            _ => {}
+impl DJControllerView {
+    pub fn new() -> Self {
+        Self {
+            status: ControllerStatus{
+                layers: vec![],
+            }
         }
     }
-
-    fn start(&mut self) {
-        todo!()
-    }
-}
-
-impl DJControllerView {
-
 }

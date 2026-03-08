@@ -34,7 +34,7 @@ pub(crate) struct DynamicNodeState {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct ApplicationConfig {
+pub struct ApplicationConfig {
     pub node_id: NodeId,
     pub node_type: NodeType,
     pub vendor_name: AsciiString<16>,
@@ -71,11 +71,6 @@ pub struct Dispatcher {
     pub(crate) bind_address: Ipv4Addr,
     pub unicast_port: u16,
     pub(crate) state: Arc<RwLock<DynamicNodeState>>,
-}
-
-pub fn send_message(application: &ApplicationNode, address: Ipv4Addr, node_id: NodeId, data: Data){
-    let dispatcher = &application.dispatcher;
-    todo!()
 }
 
 pub async fn start_node(dispatcher: Arc<Dispatcher>) {
@@ -158,11 +153,18 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
                             _ => {},
                         };
 
+                        let incoming_node_id = packet.header.node_id;
                         // send data to its respective application
-                        // TODO use channels for communication with applications
-                        if let Some(application) =
-                            dispatcher.application_nodes.write().await.get_mut(&packet.header.node_id) {
-                            application.handle_incoming_message(&packet.header, &packet.data)
+                        let send_result = if let Some(application) =
+                            &dispatcher.application_nodes.write().await.get_mut(&packet.header.node_id) {
+                            application.incoming_tx.send(packet)
+                        } else {
+                            warn!("Got message for unknown application: {:?}", &packet.header.node_id);
+                            Ok(())
+                        };
+                        if send_result.is_err(){
+                            warn!("Application {} does not listen for messages anymore, removing it from the network", &incoming_node_id);
+                            remove_application(&dispatcher, &incoming_node_id).await;
                         }
                     },
                     Err(e) => {
@@ -174,6 +176,14 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
                 error!("Network error: {}", e);
             },
         };
+    }
+}
+
+async fn remove_application(dispatcher: &Arc<Dispatcher>, node_id: &NodeId) {
+    let mut applications_lock = dispatcher.application_nodes.write().await;
+    if let Some(app_node) =applications_lock.get_mut(node_id){
+        // TODO send opt out message here
+        applications_lock.remove(node_id);
     }
 }
 

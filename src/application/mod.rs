@@ -1,26 +1,16 @@
 mod dj_controller_view;
 
-use std::net::Ipv4Addr;
+use crate::node::tcnet_packet::Packet;
+use crate::node::{ApplicationConfig, Dispatcher};
+use kanal::{Receiver, Sender};
 use std::sync::Arc;
-use crate::node::{send_message, ApplicationConfig, Dispatcher};
-use crate::node::tcnet_packet_serde::{Data, ManagementHeader, NodeId};
 
-pub trait Application {
-    fn handle_message(&self, header: &ManagementHeader, data: &Data);
-    fn start(&mut self);
-}
+// just pass on data for now
+pub type ApplicationMessage = Packet;
 
 pub struct ApplicationNode {
     pub(crate) dispatcher: Arc<Dispatcher>,
     pub(crate) config: ApplicationConfig,
-    pub(crate) application: Box<dyn Application + Send + Sync>,
-}
-
-impl ApplicationNode {
-    pub fn send_message(&self, address: Ipv4Addr, node_id: NodeId, data: Data) {
-        send_message(&self, address, node_id, data);
-    }
-    pub(crate) fn handle_incoming_message(&self, header: &ManagementHeader, data: &Data) {
-        self.application.handle_message(header, data);
-    }
+    pub(crate) incoming_tx: Sender<ApplicationMessage>,
+    pub(crate) outgoing_rx: Receiver<ApplicationMessage>,
 }
