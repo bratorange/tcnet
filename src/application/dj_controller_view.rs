@@ -1,6 +1,8 @@
+use std::time::Duration;
 use kanal::Receiver;
 use crate::application::ApplicationMessage;
-use crate::node::tcnet_packet_serde::AsciiString;
+use crate::node::tcnet_packet::management_header;
+use crate::node::tcnet_packet_serde::{AsciiString, Data};
 
 pub struct Layer{
     source: u8,
@@ -11,7 +13,7 @@ pub struct Layer{
 
 // TODO how should the layers be represented? maybe as a deku serde struct?
 pub struct ControllerStatus{
-    layers: Vec<Layer>,
+    layer_1_source: u8,
 }
 
 pub struct DJControllerView {
@@ -24,10 +26,21 @@ impl DJControllerView {
     pub fn new((rx, tx): (Receiver<ApplicationMessage>, kanal::Sender<ApplicationMessage>)) -> Self {
         Self {
             status: ControllerStatus{
-                layers: vec![],
+                layer_1_source: 0,
             },
             rx,
             tx,
+        }
+    }
+
+    pub fn process_packages(&mut self){
+        if let Ok(packet) = self.rx.recv_timeout(Duration::from_millis(10)){
+            match packet.data {
+                Data::Status(status_data) => {
+                    self.status.layer_1_source = status_data.layer_1_source;
+                },
+                _ => {},
+            }
         }
     }
 }

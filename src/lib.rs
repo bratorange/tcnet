@@ -17,7 +17,6 @@ const SPEC_MINOR_VERSION: u8 = 6;
 pub struct TCNetClient {
     _runtime: Runtime,
     dispatcher: Arc<Dispatcher>,
-    temp_test_app: DJControllerView,
 }
 
 impl TCNetClient {
@@ -37,7 +36,7 @@ impl TCNetClient {
         });
         runtime.spawn(start_node(dispatcher.clone()));
         let dispatcher_clone = dispatcher.clone();
-        let temp_test_app = runtime.block_on(async move {
+        let mut temp_test_app = runtime.block_on(async move {
             DJControllerView::new(add_application(
                 dispatcher_clone,
                 ApplicationConfig {
@@ -54,10 +53,14 @@ impl TCNetClient {
                 },
             ).await)
         });
+        runtime.spawn(async move {
+            loop {
+                temp_test_app.process_packages()
+            }
+        });
         Self {
             _runtime: runtime,
             dispatcher,
-            temp_test_app,
         }
     }
 }
