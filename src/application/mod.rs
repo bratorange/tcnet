@@ -5,6 +5,9 @@ use std::sync::Arc;
 use crate::node::dispatcher::Dispatcher;
 
 pub mod dj_controller_view;
+mod domain;
+mod mixer_view;
+mod active_dj_controller;
 
 // just pass on data for now
 pub type ApplicationMessage = Packet;

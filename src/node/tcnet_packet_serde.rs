@@ -249,45 +249,45 @@ pub struct KeyboardData {
 // DATA PACKET - METRICS DATA (Message Type 200, Data Type 2)
 #[derive(Debug, PartialEq, DekuRead, DekuWrite)]
 pub struct MetricsData {
-    data_type: u8,                      // Datatype 2 = Metrics
-    layer_id: u8,                       // Layer Number
-    _reserved0: ReservedData<1>,                     // RESERVED
-    layer_state: u8,                    // Layer State
-    _reserved1: ReservedData<1>,                     // RESERVED
-    sync_master: u8,                    // Sync Master
-    _reserved2: ReservedData<1>,                     // RESERVED
-    beat_marker: u8,                    // Beat Marker
+    pub data_type: u8,                      // Datatype 2 = Metrics
+    pub layer_id: u8,                       // Layer Number
+    pub _reserved0: ReservedData<1>,                     // RESERVED
+    pub layer_state: u8,                    // Layer State
+    pub _reserved1: ReservedData<1>,                     // RESERVED
+    pub sync_master: u8,                    // Sync Master
+    pub _reserved2: ReservedData<1>,                     // RESERVED
+    pub beat_marker: u8,                    // Beat Marker
     #[deku(endian = "little")]
-    track_length: u32,                  // Track Length in Milliseconds
+    pub track_length: u32,                  // Track Length in Milliseconds
     #[deku(endian = "little")]
-    current_position: u32,              // Play head Position in Milliseconds
+    pub current_position: u32,              // Play head Position in Milliseconds
     #[deku(endian = "little")]
-    speed: u32,                         // Play head Speed
-    _reserved3: ReservedData<13>,               // RESERVED
+    pub speed: u32,                         // Play head Speed
+    pub _reserved3: ReservedData<13>,               // RESERVED
     #[deku(endian = "little")]
-    beat_number: u32,                   // Beat Number
-    _reserved4: ReservedData<51>,               // RESERVED
+    pub beat_number: u32,                   // Beat Number
+    pub _reserved4: ReservedData<51>,               // RESERVED
     #[deku(endian = "little")]
-    bpm: u32,                           // BPM
+    pub bpm: u32,                           // BPM
     #[deku(endian = "little")]
-    pitch_bend: u16,                    // Pitch Bend
+    pub pitch_bend: u16,                    // Pitch Bend
     #[deku(endian = "little")]
-    track_id: u32,                      // Assigned Track ID
+    pub track_id: u32,                      // Assigned Track ID
 }
 
 // DATA PACKET - METADATA (Message Type 200, Data Type 4)
 #[derive(Debug, PartialEq, DekuRead, DekuWrite)]
 pub struct MetaData {
-    data_type: u8,                      // Datatype 4 = Metadata
-    layer_id: u8,                       // Layer ID
-    _reserved0: ReservedData<1>,                     // RESERVED
-    _reserved1: ReservedData<2>,                // RESERVED
-    track_artist: [u8; 256],            // Track Artist Name (UTF-16 in v3.5+)
-    track_title: [u8; 256],             // Track Title Name (UTF-16 in v3.5+)
+    pub data_type: u8,                      // Datatype 4 = Metadata
+    pub layer_id: u8,                       // Layer ID
+    pub _reserved0: ReservedData<1>,                     // RESERVED
+    pub _reserved1: ReservedData<2>,                // RESERVED
+    pub track_artist: [u8; 256],            // Track Artist Name (UTF-16 in v3.5+)
+    pub track_title: [u8; 256],             // Track Title Name (UTF-16 in v3.5+)
     #[deku(endian = "little")]
-    track_key: u16,                     // Track KEY
+    pub track_key: u16,                     // Track KEY
     #[deku(endian = "little")]
-    track_id: u32,                      // Assigned Track ID
+    pub track_id: u32,                      // Assigned Track ID
 }
 
 // DATA PACKET - BEAT GRID DATA (Message Type 200, Data Type 8)
@@ -376,87 +376,87 @@ pub struct BigWaveformData {
 // DATA PACKET - MIXER DATA (Message Type 200, Data Type 150)
 #[derive(Debug, PartialEq, DekuRead, DekuWrite)]
 pub struct MixerChannel {
-    source_select: u8,                  // Channel Source Select
-    audio_level: u8,                    // Channel Audio Level
-    fader_level: u8,                    // Channel Fader Level
-    trim_level: u8,                     // Channel Trim Level
-    comp_level: u8,                     // Channel Compressor Level
-    eq_hi_level: u8,                    // Channel EQ Hi Level
-    eq_hi_mid_level: u8,                // Channel EQ Hi Mid Level
-    eq_low_mid_level: u8,               // Channel EQ Low Mid Level
-    eq_low_level: u8,                   // Channel EQ Low Level
-    filter_color: u8,                   // Channel Filter/Color
-    send: u8,                           // Channel FX Send
-    cue_a: u8,                          // Channel CUE A
-    cue_b: u8,                          // Channel CUE B
-    crossfader_assign: u8,              // Channel Crossfader Assign
-    _reserved: [u8; 10],                // RESERVED
+    pub source_select: u8,                  // Channel Source Select
+    pub audio_level: u8,                    // Channel Audio Level
+    pub fader_level: u8,                    // Channel Fader Level
+    pub trim_level: u8,                     // Channel Trim Level
+    pub comp_level: u8,                     // Channel Compressor Level
+    pub eq_hi_level: u8,                    // Channel EQ Hi Level
+    pub eq_hi_mid_level: u8,                // Channel EQ Hi Mid Level
+    pub eq_low_mid_level: u8,               // Channel EQ Low Mid Level
+    pub eq_low_level: u8,                   // Channel EQ Low Level
+    pub filter_color: u8,                   // Channel Filter/Color
+    pub send: u8,                           // Channel FX Send
+    pub cue_a: u8,                          // Channel CUE A
+    pub cue_b: u8,                          // Channel CUE B
+    pub crossfader_assign: u8,              // Channel Crossfader Assign
+    pub _reserved: [u8; 10],                // RESERVED
 }
 
 #[derive(Debug, PartialEq, DekuRead, DekuWrite)]
 pub struct MixerData {
-    data_type: u8,                      // Datatype 150 = Mixer Data
-    mixer_id: u8,                       // Mixer ID
-    mixer_type: u8,                     // Mixer Type
-    _reserved0: ReservedData<1>,        // RESERVED
-    _reserved1: ReservedData<1>,        // RESERVED
-    mixer_name: [u8; 16],               // Name of Mixer
-    _reserved2: ReservedData<12>,       // RESERVED
-    _reserved3: ReservedData<2>,        // RESERVED FOR MIC 1-2 LEVEL
-    mic_eq_hi: u8,                      // Mic EQ HI
-    mic_eq_low: u8,                     // Mic EQ Low
-    master_audio_level: u8,             // Master Audio Level
-    master_fader_level: u8,             // Master Fader Level
-    _reserved4: ReservedData<4>,        // RESERVED
-    link_cue_a: u8,                     // Link CUE A
-    link_cue_b: u8,                     // Link CUE B
-    master_filter: u8,                  // Master Filter
-    _reserved5: ReservedData<1>,        // RESERVED
-    master_cue_a: u8,                   // Master CUE A
-    master_cue_b: u8,                   // Master CUE B
-    _reserved6: ReservedData<1>,        // RESERVED
-    master_isolator_on_off: u8,         // Master Isolator Switch
-    master_isolator_hi: u8,             // Master Isolator Hi
-    master_isolator_mid: u8,            // Master Isolator Mid
-    master_isolator_low: u8,            // Master Isolator Low
-    _reserved7: ReservedData<1>,        // RESERVED
-    filter_hpf: u8,                     // Filter HPF
-    filter_lpf: u8,                     // Filter LPF
-    filter_resonance: u8,               // Filter Resonance
-    _reserved8: ReservedData<2>,        // RESERVED
-    send_fx_effect: u8,                 // Send FX Effect
-    send_fx_ext_1: u8,                  // Send Return Ext 1
-    send_fx_ext_2: u8,                  // Send Return Ext 2
-    send_fx_master_mix: u8,             // Send FX Master Mix
-    send_fx_size_feedback: u8,          // Send FX Size Feedback
-    send_fx_time: u8,                   // Send FX Time
-    send_fx_hpf: u8,                    // Send FX HPF
-    send_fx_level: u8,                  // Send FX Level
-    send_return_3_source_select: u8,    // Send Return 3 Source Select
-    send_return_3_type: u8,             // Send Return 3 Type
-    send_return_3_on_off: u8,           // Send Return 3 ON/OFF
-    send_return_3_level: u8,            // Send Return 3 Level
-    _reserved9: ReservedData<1>,        // RESERVED
-    channel_fader_curve: u8,            // Channel Fader Curve
-    cross_fader_curve: u8,              // Cross Fader Curve
-    cross_fader: u8,                    // Cross Fader
-    beat_fx_on_off: u8,                 // BeatFX ON/OFF
-    beat_fx_level_depth: u8,            // BeatFX Level/Depth
-    beat_fx_channel_select: u8,         // BeatFX Channel Select
-    beat_fx_select: u8,                 // BeatFX Select
-    beat_fx_freq_hi: u8,                // BeatFX Frequency Hi
-    beat_fx_freq_mid: u8,               // BeatFX Frequency Mid
-    beat_fx_freq_low: u8,               // BeatFX Frequency Low
-    headphones_pre_eq: u8,              // Headphones Pre EQ
-    headphones_a_level: u8,             // Headphones A Level
-    headphones_a_mix: u8,               // Headphones A Mix
-    headphones_b_level: u8,             // Headphones B Level
-    headphones_b_mix: u8,               // Headphones B Mix
-    booth_level: u8,                    // Booth Level
-    booth_eq_hi: u8,                    // Booth EQ Hi
-    booth_eq_low: u8,                   // Booth EQ Low
-    _reserved10: [u8; 10],              // RESERVED
-    channels: [MixerChannel; 6],        // Channels 1-6
+    pub data_type: u8,                      // Datatype 150 = Mixer Data
+    pub mixer_id: u8,                       // Mixer ID
+    pub mixer_type: u8,                     // Mixer Type
+    pub _reserved0: ReservedData<1>,        // RESERVED
+    pub _reserved1: ReservedData<1>,        // RESERVED
+    pub mixer_name: [u8; 16],               // Name of Mixer
+    pub _reserved2: ReservedData<12>,       // RESERVED
+    pub _reserved3: ReservedData<2>,        // RESERVED FOR MIC 1-2 LEVEL
+    pub mic_eq_hi: u8,                      // Mic EQ HI
+    pub mic_eq_low: u8,                     // Mic EQ Low
+    pub master_audio_level: u8,             // Master Audio Level
+    pub master_fader_level: u8,             // Master Fader Level
+    pub _reserved4: ReservedData<4>,        // RESERVED
+    pub link_cue_a: u8,                     // Link CUE A
+    pub link_cue_b: u8,                     // Link CUE B
+    pub master_filter: u8,                  // Master Filter
+    pub _reserved5: ReservedData<1>,        // RESERVED
+    pub master_cue_a: u8,                   // Master CUE A
+    pub master_cue_b: u8,                   // Master CUE B
+    pub _reserved6: ReservedData<1>,        // RESERVED
+    pub master_isolator_on_off: u8,         // Master Isolator Switch
+    pub master_isolator_hi: u8,             // Master Isolator Hi
+    pub master_isolator_mid: u8,            // Master Isolator Mid
+    pub master_isolator_low: u8,            // Master Isolator Low
+    pub _reserved7: ReservedData<1>,        // RESERVED
+    pub filter_hpf: u8,                     // Filter HPF
+    pub filter_lpf: u8,                     // Filter LPF
+    pub filter_resonance: u8,               // Filter Resonance
+    pub _reserved8: ReservedData<2>,        // RESERVED
+    pub send_fx_effect: u8,                 // Send FX Effect
+    pub send_fx_ext_1: u8,                  // Send Return Ext 1
+    pub send_fx_ext_2: u8,                  // Send Return Ext 2
+    pub send_fx_master_mix: u8,             // Send FX Master Mix
+    pub send_fx_size_feedback: u8,          // Send FX Size Feedback
+    pub send_fx_time: u8,                   // Send FX Time
+    pub send_fx_hpf: u8,                    // Send FX HPF
+    pub send_fx_level: u8,                  // Send FX Level
+    pub send_return_3_source_select: u8,    // Send Return 3 Source Select
+    pub send_return_3_type: u8,             // Send Return 3 Type
+    pub send_return_3_on_off: u8,           // Send Return 3 ON/OFF
+    pub send_return_3_level: u8,            // Send Return 3 Level
+    pub _reserved9: ReservedData<1>,        // RESERVED
+    pub channel_fader_curve: u8,            // Channel Fader Curve
+    pub cross_fader_curve: u8,              // Cross Fader Curve
+    pub cross_fader: u8,                    // Cross Fader
+    pub beat_fx_on_off: u8,                 // BeatFX ON/OFF
+    pub beat_fx_level_depth: u8,            // BeatFX Level/Depth
+    pub beat_fx_channel_select: u8,         // BeatFX Channel Select
+    pub beat_fx_select: u8,                 // BeatFX Select
+    pub beat_fx_freq_hi: u8,                // BeatFX Frequency Hi
+    pub beat_fx_freq_mid: u8,               // BeatFX Frequency Mid
+    pub beat_fx_freq_low: u8,               // BeatFX Frequency Low
+    pub headphones_pre_eq: u8,              // Headphones Pre EQ
+    pub headphones_a_level: u8,             // Headphones A Level
+    pub headphones_a_mix: u8,               // Headphones A Mix
+    pub headphones_b_level: u8,             // Headphones B Level
+    pub headphones_b_mix: u8,               // Headphones B Mix
+    pub booth_level: u8,                    // Booth Level
+    pub booth_eq_hi: u8,                    // Booth EQ Hi
+    pub booth_eq_low: u8,                   // Booth EQ Low
+    pub _reserved10: [u8; 10],              // RESERVED
+    pub channels: [MixerChannel; 6],        // Channels 1-6
 }
 
 // FILE PACKET - LOW RES ARTWORK (Message Type 204, Data Type 128)
@@ -494,84 +494,84 @@ pub struct AppSpecificData {
 }
 
 // TIME PACKET (Message Type 254)
-#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+#[derive(Debug, Clone, PartialEq, DekuRead, DekuWrite)]
 pub struct LayerTimecode {
-    smpte_mode: u8,                     // Layer SMPTE Mode (24/25/29/30)
-    state: u8,                          // Time Code State (0=Stopped, 1=Running, 2=Force Resync)
-    hours: u8,                          // Time Code Hours (0-23)
-    minutes: u8,                        // Time Code Minutes (0-59)
-    seconds: u8,                        // Time Code Seconds (0-59)
-    frames: u8,                         // Time Code Frames
+    pub smpte_mode: u8,                     // Layer SMPTE Mode (24/25/29/30)
+    pub state: u8,                          // Time Code State (0=Stopped, 1=Running, 2=Force Resync)
+    pub hours: u8,                          // Time Code Hours (0-23)
+    pub minutes: u8,                        // Time Code Minutes (0-59)
+    pub seconds: u8,                        // Time Code Seconds (0-59)
+    pub frames: u8,                         // Time Code Frames
 }
 
 #[derive(Debug, PartialEq, DekuRead, DekuWrite)]
 pub struct TimePacketData {
     #[deku(endian = "little")]
-    l1_time: u32,                       // LAYER 1 Current Time in Milliseconds
+    pub l1_time: u32,                       // LAYER 1 Current Time in Milliseconds
     #[deku(endian = "little")]
-    l2_time: u32,                       // LAYER 2 Current Time in Milliseconds
+    pub l2_time: u32,                       // LAYER 2 Current Time in Milliseconds
     #[deku(endian = "little")]
-    l3_time: u32,                       // LAYER 3 Current Time in Milliseconds
+    pub l3_time: u32,                       // LAYER 3 Current Time in Milliseconds
     #[deku(endian = "little")]
-    l4_time: u32,                       // LAYER 4 Current Time in Milliseconds
+    pub l4_time: u32,                       // LAYER 4 Current Time in Milliseconds
     #[deku(endian = "little")]
-    la_time: u32,                       // LAYER A Current Time in Milliseconds
+    pub la_time: u32,                       // LAYER A Current Time in Milliseconds
     #[deku(endian = "little")]
-    lb_time: u32,                       // LAYER B Current Time in Milliseconds
+    pub lb_time: u32,                       // LAYER B Current Time in Milliseconds
     #[deku(endian = "little")]
-    lm_time: u32,                       // LAYER M Current Time in Milliseconds
+    pub lm_time: u32,                       // LAYER M Current Time in Milliseconds
     #[deku(endian = "little")]
-    lc_time: u32,                       // LAYER C Current Time in Milliseconds
+    pub lc_time: u32,                       // LAYER C Current Time in Milliseconds
     #[deku(endian = "little")]
-    l1_total_time: u32,                 // LAYER 1 Total Time in Milliseconds
+    pub l1_total_time: u32,                 // LAYER 1 Total Time in Milliseconds
     #[deku(endian = "little")]
-    l2_total_time: u32,                 // LAYER 2 Total Time in Milliseconds
+    pub l2_total_time: u32,                 // LAYER 2 Total Time in Milliseconds
     #[deku(endian = "little")]
-    l3_total_time: u32,                 // LAYER 3 Total Time in Milliseconds
+    pub l3_total_time: u32,                 // LAYER 3 Total Time in Milliseconds
     #[deku(endian = "little")]
-    l4_total_time: u32,                 // LAYER 4 Total Time in Milliseconds
+    pub l4_total_time: u32,                 // LAYER 4 Total Time in Milliseconds
     #[deku(endian = "little")]
-    la_total_time: u32,                 // LAYER A Total Time in Milliseconds
+    pub la_total_time: u32,                 // LAYER A Total Time in Milliseconds
     #[deku(endian = "little")]
-    lb_total_time: u32,                 // LAYER B Total Time in Milliseconds
+    pub lb_total_time: u32,                 // LAYER B Total Time in Milliseconds
     #[deku(endian = "little")]
-    lm_total_time: u32,                 // LAYER M Total Time in Milliseconds
+    pub lm_total_time: u32,                 // LAYER M Total Time in Milliseconds
     #[deku(endian = "little")]
-    lc_total_time: u32,                 // LAYER C Total Time in Milliseconds
-    l1_beat_marker: u8,                 // Layer 1 Beatmarker
-    l2_beat_marker: u8,                 // Layer 2 Beatmarker
-    l3_beat_marker: u8,                 // Layer 3 Beatmarker
-    l4_beat_marker: u8,                 // Layer 4 Beatmarker
-    la_beat_marker: u8,                 // Layer A Beatmarker
-    lb_beat_marker: u8,                 // Layer B Beatmarker
-    lm_beat_marker: u8,                 // Layer M Beatmarker
-    lc_beat_marker: u8,                 // Layer C Beatmarker
-    l1_layer_state: u8,                 // Layer 1 Layer State
-    l2_layer_state: u8,                 // Layer 2 Layer State
-    l3_layer_state: u8,                 // Layer 3 Layer State
-    l4_layer_state: u8,                 // Layer 4 Layer State
-    la_layer_state: u8,                 // Layer A State
-    lb_layer_state: u8,                 // Layer B State
-    lm_layer_state: u8,                 // Layer M State
-    lc_layer_state: u8,                 // Layer C State
-    _reserved0: ReservedData<1>,                     // RESERVED
-    smpte_mode: u8,                     // General SMPTE Mode
-    l1_timecode: LayerTimecode,         // Layer 1 Timecode
-    l2_timecode: LayerTimecode,         // Layer 2 Timecode
-    l3_timecode: LayerTimecode,         // Layer 3 Timecode
-    l4_timecode: LayerTimecode,         // Layer 4 Timecode
-    la_timecode: LayerTimecode,         // Layer A Timecode
-    lb_timecode: LayerTimecode,         // Layer B Timecode
-    lm_timecode: LayerTimecode,         // Layer M Timecode
-    lc_timecode: LayerTimecode,         // Layer C Timecode
-    l1_on_air: u8,                      // Layer 1 OnAir State (fader position 0-255)
-    l2_on_air: u8,                      // Layer 2 OnAir State
-    l3_on_air: u8,                      // Layer 3 OnAir State
-    l4_on_air: u8,                      // Layer 4 OnAir State
-    la_on_air: u8,                      // Layer A OnAir State
-    lb_on_air: u8,                      // Layer B OnAir State
-    lm_on_air: u8,                      // Layer M OnAir State
-    lc_on_air: u8,                      // Layer C OnAir State
+    pub lc_total_time: u32,                 // LAYER C Total Time in Milliseconds
+    pub l1_beat_marker: u8,                 // Layer 1 Beatmarker
+    pub l2_beat_marker: u8,                 // Layer 2 Beatmarker
+    pub l3_beat_marker: u8,                 // Layer 3 Beatmarker
+    pub l4_beat_marker: u8,                 // Layer 4 Beatmarker
+    pub la_beat_marker: u8,                 // Layer A Beatmarker
+    pub lb_beat_marker: u8,                 // Layer B Beatmarker
+    pub lm_beat_marker: u8,                 // Layer M Beatmarker
+    pub lc_beat_marker: u8,                 // Layer C Beatmarker
+    pub l1_layer_state: u8,                 // Layer 1 Layer State
+    pub l2_layer_state: u8,                 // Layer 2 Layer State
+    pub l3_layer_state: u8,                 // Layer 3 Layer State
+    pub l4_layer_state: u8,                 // Layer 4 Layer State
+    pub la_layer_state: u8,                 // Layer A State
+    pub lb_layer_state: u8,                 // Layer B State
+    pub lm_layer_state: u8,                 // Layer M State
+    pub lc_layer_state: u8,                 // Layer C State
+    pub _reserved0: ReservedData<1>,                     // RESERVED
+    pub smpte_mode: u8,                     // General SMPTE Mode
+    pub l1_timecode: LayerTimecode,         // Layer 1 Timecode
+    pub l2_timecode: LayerTimecode,         // Layer 2 Timecode
+    pub l3_timecode: LayerTimecode,         // Layer 3 Timecode
+    pub l4_timecode: LayerTimecode,         // Layer 4 Timecode
+    pub la_timecode: LayerTimecode,         // Layer A Timecode
+    pub lb_timecode: LayerTimecode,         // Layer B Timecode
+    pub lm_timecode: LayerTimecode,         // Layer M Timecode
+    pub lc_timecode: LayerTimecode,         // Layer C Timecode
+    pub l1_on_air: u8,                      // Layer 1 OnAir State (fader position 0-255)
+    pub l2_on_air: u8,                      // Layer 2 OnAir State
+    pub l3_on_air: u8,                      // Layer 3 OnAir State
+    pub l4_on_air: u8,                      // Layer 4 OnAir State
+    pub la_on_air: u8,                      // Layer A OnAir State
+    pub lb_on_air: u8,                      // Layer B OnAir State
+    pub lm_on_air: u8,                      // Layer M OnAir State
+    pub lc_on_air: u8,                      // Layer C OnAir State
 }
 
 #[derive(Debug)]

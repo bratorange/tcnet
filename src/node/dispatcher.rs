@@ -16,6 +16,11 @@ use crate::node::tcnet_packet::{opt_in_node_config, opt_in_packet, Packet};
 use crate::node::tcnet_packet_serde::Data::{OptIn, OptOut};
 use crate::node::tcnet_packet_serde::NodeId;
 
+pub struct OutgoingMessage {
+    pub destination: SocketAddr,
+    pub packet: Packet,
+}
+
 #[derive(Clone)]
 pub struct Dispatcher {
     pub(crate) application_nodes: Arc<RwLock<HashMap<NodeId, ApplicationNode>>>,

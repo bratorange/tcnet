@@ -6,7 +6,7 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 use tokio::sync::RwLock;
-use crate::application::dj_controller_view::DJControllerView;
+use crate::application::dj_controller_view::DjControllerView;
 
 mod application;
 pub mod node;
@@ -37,7 +37,7 @@ impl TCNetClient {
         runtime.spawn(start_node(dispatcher.clone()));
         let dispatcher_clone = dispatcher.clone();
         let mut temp_test_app = runtime.block_on(async move {
-            DJControllerView::new(add_application(
+            DjControllerView::new(add_application(
                 dispatcher_clone,
                 ApplicationConfig {
                     node_id: 0,
@@ -55,7 +55,8 @@ impl TCNetClient {
         });
         runtime.spawn(async move {
             loop {
-                temp_test_app.process_packages()
+                temp_test_app.process_available();
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
         });
         Self {
