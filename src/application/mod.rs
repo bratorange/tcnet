@@ -3,6 +3,7 @@ use crate::node::ApplicationConfig;
 use kanal::{Receiver, Sender};
 use std::sync::Arc;
 use crate::node::dispatcher::Dispatcher;
+use crate::node::tcnet_packet_serde::NodeId;
 
 pub mod dj_controller_view;
 mod domain;
@@ -13,8 +14,8 @@ mod active_dj_controller;
 pub type ApplicationMessage = Packet;
 
 pub struct ApplicationNode {
-    pub(crate) dispatcher: Arc<Dispatcher>,
-    pub(crate) config: ApplicationConfig,
-    pub(crate) incoming_tx: Sender<ApplicationMessage>,
-    pub(crate) outgoing_rx: Receiver<ApplicationMessage>,
+    pub dispatcher: Arc<Dispatcher>,
+    pub config: ApplicationConfig,
+    pub incoming_tx: Sender<ApplicationMessage>,
+    pub outgoing_rx: Receiver<ApplicationMessage>,
 }

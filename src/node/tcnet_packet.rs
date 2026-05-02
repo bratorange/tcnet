@@ -6,6 +6,7 @@ use crate::into_ascii;
 use crate::node::{ApplicationConfig, DynamicNodeState};
 use crate::node::dispatcher::timestamp_micros;
 
+#[derive(Clone)]
 pub struct Packet
 {
     pub(crate) header: ManagementHeader,

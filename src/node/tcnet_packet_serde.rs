@@ -39,7 +39,7 @@ impl DekuReader<'_> for NodeOptions {
 pub type Timestamp = u32; // timestamp in microseconds
 pub type NodeName = AsciiString<8>;
 
-#[derive(PartialEq, DekuWrite, DekuRead)]
+#[derive(PartialEq, DekuWrite, DekuRead, Clone)]
 pub struct ReservedData<const N: usize>(pub [u8; N]);
 
 impl<const N: usize> Default for ReservedData<N> {
@@ -98,7 +98,7 @@ impl<const N: usize> Debug for AsciiString<N> {
     }
 }
 
-#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+#[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
 pub struct ManagementHeader {
     pub node_id: NodeId,
     pub protocol_version_major: u8,
@@ -112,7 +112,7 @@ pub struct ManagementHeader {
     pub timestamp: Timestamp,
 }
 
-#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+#[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
 pub struct OptInData{
     pub node_count: u16, // Amount of Registered Node
     pub node_listener_port: u16,            // Listener Port for Unicast Messages
@@ -128,14 +128,14 @@ pub struct OptInData{
 
 // TODO Opt-Out packet
 
-#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+#[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
 #[deku(id_type = "u8")]
 #[repr(u8)]
 pub enum LayerStatus{
     Variant = 0, // TODO
 }
 
-#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+#[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
 pub struct StatusData {
     pub node_count: u16,                    // Amount of Registered Nodes
     pub node_listener_port: u16,            // Listener Port for Unicast Messages
@@ -164,10 +164,10 @@ pub struct StatusData {
     pub layer_b_track_id: u32,              // Assigned Track ID for Layer B
     pub layer_m_track_id: u32,              // Assigned Track ID for Layer M
     pub layer_c_track_id: u32,              // Assigned Track ID for Layer C
-    pub _reserved1: ReservedData<1>,                // RESERVED
+    pub _reserved1: ReservedData<1>,        // RESERVED
     pub smpte_mode: u8,                     // SMPTE Mode
     pub auto_master_mode: AutoMasterMode,   // Auto Master Mode
-    pub _reserved2: ReservedData<15>,               // RESERVED
+    pub _reserved2: ReservedData<15>,       // RESERVED
     pub app_specific: [u8; 72],             // APP SPECIFIC
     pub layer_1_name: [u8; 16],             // Layer 1 Source
     pub layer_2_name: [u8; 16],             // Layer 2 Source
@@ -180,14 +180,14 @@ pub struct StatusData {
 }
 
 // OPT-OUT (Message Type 3)
-#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+#[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
 pub struct OptOutData {
     node_count: u16,                    // Amount of Registered Nodes
     node_listener_port: u16,            // Listener Port for Unicast Messages
 }
 
 // TIME SYNC (Message Type 10)
-#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+#[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
 pub struct TimeSyncData {
     step: u8,                           // Step No (0=Initialize, 1=Response)
     _reserved0: ReservedData<1>,        // RESERVED
@@ -196,7 +196,7 @@ pub struct TimeSyncData {
 }
 
 // ERROR/NOTIFICATION (Message Type 13)
-#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+#[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
 pub struct ErrorNotificationData {
     datatype: u8,                       // Data type of Request
     layer_id: u8,                       // Layer ID of original request
@@ -205,14 +205,14 @@ pub struct ErrorNotificationData {
 }
 
 // REQUEST (Message Type 20)
-#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+#[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
 pub struct RequestData {
     data_type: u8,                      // Data Type
     layer: u8,                          // Layer where data belongs to
 }
 
 // CONTROL (Message Type 101)
-#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+#[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
 pub struct ControlData {
     step: u8,                           // Step No (0=Initialize, 1=Response)
     _reserved0: ReservedData<1>,                     // RESERVED
@@ -224,7 +224,7 @@ pub struct ControlData {
 }
 
 // TEXT DATA (Message Type 128)
-#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+#[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
 pub struct TextData {
     step: u8,                           // Step No (0=Initialize, 1=Response)
     _reserved0: ReservedData<1>,                     // RESERVED
@@ -236,7 +236,7 @@ pub struct TextData {
 }
 
 // KEYBOARD DATA (Message Type 132)
-#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+#[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
 pub struct KeyboardData {
     _reserved0: ReservedData<1>,                     // RESERVED
     _reserved1: ReservedData<1>,                     // RESERVED
@@ -247,7 +247,7 @@ pub struct KeyboardData {
 }
 
 // DATA PACKET - METRICS DATA (Message Type 200, Data Type 2)
-#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+#[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
 pub struct MetricsData {
     pub data_type: u8,                      // Datatype 2 = Metrics
     pub layer_id: u8,                       // Layer Number
@@ -276,12 +276,12 @@ pub struct MetricsData {
 }
 
 // DATA PACKET - METADATA (Message Type 200, Data Type 4)
-#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+#[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
 pub struct MetaData {
     pub data_type: u8,                      // Datatype 4 = Metadata
     pub layer_id: u8,                       // Layer ID
-    pub _reserved0: ReservedData<1>,                     // RESERVED
-    pub _reserved1: ReservedData<2>,                // RESERVED
+    pub _reserved0: ReservedData<1>,        // RESERVED
+    pub _reserved1: ReservedData<2>,        // RESERVED
     pub track_artist: [u8; 256],            // Track Artist Name (UTF-16 in v3.5+)
     pub track_title: [u8; 256],             // Track Title Name (UTF-16 in v3.5+)
     #[deku(endian = "little")]
@@ -291,7 +291,7 @@ pub struct MetaData {
 }
 
 // DATA PACKET - BEAT GRID DATA (Message Type 200, Data Type 8)
-#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+#[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
 pub struct BeatGridHeader {
     data_type: u8,                      // Datatype 8 = Beat Grid Data
     layer_id: u8,                       // Layer Number
@@ -305,35 +305,35 @@ pub struct BeatGridHeader {
     data_cluster_size: u32,             // Data Cluster Size
 }
 
-#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+#[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
 pub struct BeatGridEntry {
     #[deku(endian = "little")]
     beat_number: u16,                   // Beat Number
     beat_type: u8,                      // 20 = Downbeat, 10 = Upbeat
-    _reserved0: ReservedData<1>,                     // RESERVED
+    _reserved0: ReservedData<1>,        // RESERVED
     #[deku(endian = "little")]
     beat_timestamp: u32,                // Timestamp in MS
 }
 
 // DATA PACKET - CUE DATA (Message Type 200, Data Type 12)
-#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+#[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
 pub struct CueEntry {
     cue_type: u8,                       // Cue Type
-    _reserved0: ReservedData<1>,                     // RESERVED
+    _reserved0: ReservedData<1>,        // RESERVED
     #[deku(endian = "little")]
     cue_in_time: u32,                   // CUE IN Time
     #[deku(endian = "little")]
     cue_out_time: u32,                  // CUE OUT Time
-    _reserved1: ReservedData<1>,                     // RESERVED
+    _reserved1: ReservedData<1>,        // RESERVED
     cue_color: [u8; 3],                 // CUE Color (R, G, B)
-    _reserved2: ReservedData<8>,                // RESERVED
+    _reserved2: ReservedData<8>,        // RESERVED
 }
 
-#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+#[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
 pub struct CueData {
     data_type: u8,                      // Datatype 12 = Cue Data
     layer_id: u8,                       // Layer Number
-    _reserved0: ReservedData<16>,               // RESERVED
+    _reserved0: ReservedData<16>,       // RESERVED
     #[deku(endian = "little")]
     loop_in: u32,                       // Loop IN Time
     #[deku(endian = "little")]
@@ -342,7 +342,7 @@ pub struct CueData {
 }
 
 // DATA PACKET - SMALL WAVEFORM (Message Type 200, Data Type 16)
-#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+#[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
 pub struct SmallWaveformData {
     data_type: u8,                      // Datatype 16 = Small Waveform
     layer_id: u8,                       // Layer Number
@@ -357,7 +357,7 @@ pub struct SmallWaveformData {
 }
 
 // DATA PACKET - BIG WAVEFORM (Message Type 200, Data Type 32)
-#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+#[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
 pub struct BigWaveformData {
     data_type: u8,                      // Datatype 32 = Big Waveform
     layer_id: u8,                       // Layer Number
@@ -374,7 +374,7 @@ pub struct BigWaveformData {
 }
 
 // DATA PACKET - MIXER DATA (Message Type 200, Data Type 150)
-#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+#[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
 pub struct MixerChannel {
     pub source_select: u8,                  // Channel Source Select
     pub audio_level: u8,                    // Channel Audio Level
@@ -393,7 +393,7 @@ pub struct MixerChannel {
     pub _reserved: [u8; 10],                // RESERVED
 }
 
-#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+#[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
 pub struct MixerData {
     pub data_type: u8,                      // Datatype 150 = Mixer Data
     pub mixer_id: u8,                       // Mixer ID
@@ -460,7 +460,7 @@ pub struct MixerData {
 }
 
 // FILE PACKET - LOW RES ARTWORK (Message Type 204, Data Type 128)
-#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+#[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
 pub struct ArtworkFileData {
     data_type: u8,                      // Datatype 128 = Low Res Artwork File
     layer_id: u8,                       // Layer Number
@@ -477,7 +477,7 @@ pub struct ArtworkFileData {
 }
 
 // APPLICATION SPECIFIC DATA PACKET (Message Type 30 / 213)
-#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+#[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
 pub struct AppSpecificData {
     data_identifier_1: u8,              // Application Identifier Signature 1/2
     data_identifier_2: u8,              // Application Identifier Signature 2/2
@@ -504,7 +504,7 @@ pub struct LayerTimecode {
     pub frames: u8,                         // Time Code Frames
 }
 
-#[derive(Debug, PartialEq, DekuRead, DekuWrite)]
+#[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
 pub struct TimePacketData {
     #[deku(endian = "little")]
     pub l1_time: u32,                       // LAYER 1 Current Time in Milliseconds
@@ -574,7 +574,7 @@ pub struct TimePacketData {
     pub lc_on_air: u8,                      // Layer C OnAir State
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Data {
     OptIn(OptInData),
     OptOut(OptOutData),

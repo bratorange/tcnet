@@ -109,18 +109,14 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
                             _ => {},
                         };
 
-                        let incoming_node_id = packet.header.node_id;
                         // send data to its respective application
-                        let send_result = if let Some(application) =
-                            &dispatcher.application_nodes.write().await.get_mut(&packet.header.node_id) {
-                            application.incoming_tx.send(packet)
-                        } else {
-                            warn!("Got message for unknown application: {:?}", &packet.header.node_id);
-                            Ok(())
-                        };
-                        if send_result.is_err(){
-                            warn!("Application {} does not listen for messages anymore, removing it from the network", &incoming_node_id);
-                            remove_application(&dispatcher, &incoming_node_id).await;
+                        for application in &dispatcher.application_nodes.write().await.get_mut(&packet.header.node_id){
+                            let send_result = application.incoming_tx.send(packet.clone());
+                            let node_id = application.config.node_id;
+                            if send_result.is_err(){
+                                warn!("Application {} does not listen for messages anymore, removing it from the node", &node_id);
+                                remove_application(&dispatcher, &node_id).await;
+                            }
                         }
                     },
                     Err(e) => {
@@ -149,7 +145,6 @@ pub async fn add_application(
 pub async fn remove_application(dispatcher: &Arc<Dispatcher>, node_id: &NodeId) {
     let mut applications_lock = dispatcher.application_nodes.write().await;
     if let Some(app_node) =applications_lock.get_mut(node_id){
-        // TODO send opt out message here
         applications_lock.remove(node_id);
     }
 }
