@@ -66,6 +66,7 @@ impl LayerSnapshot {
 ///
 /// Typical use: call `process_available()` in your event loop or a dedicated
 /// async task, then read `layers` whenever you need the current state.
+#[derive(Debug)]
 pub struct DjControllerView {
     pub layers: HashMap<LayerId, LayerSnapshot>,
     rx: Receiver<ApplicationMessage>,
@@ -86,6 +87,7 @@ impl DjControllerView {
     pub fn process_available(&mut self) {
         while let Ok(Some(packet)) = self.rx.try_recv_realtime() {
             self.apply(packet);
+            log::trace!("New Controller state: {:?}", self);
         }
     }
 
