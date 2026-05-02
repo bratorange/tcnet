@@ -7,7 +7,6 @@ use crate::node::tcnet_packet_serde::NodeId;
 
 pub mod dj_controller_view;
 mod domain;
-mod mixer_view;
 mod active_dj_controller;
 
 // just pass on data for now
