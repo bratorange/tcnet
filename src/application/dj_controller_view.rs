@@ -283,7 +283,7 @@ impl DjControllerView {
                     None => return,
                 };
                 let snap = self.layers.entry(layer_id).or_default();
-                snap.state = LayerState::from_u8(m.layer_state);
+                snap.state = m.layer_state;
                 snap.sync_master = m.sync_master != 0;
                 snap.beat_marker = m.beat_marker;
                 snap.track_length_ms = m.track_length;
@@ -329,7 +329,7 @@ impl DjControllerView {
                     let snap = self.layers.entry(id).or_default();
                     snap.current_time_ms = cur_times[i];
                     snap.total_time_ms = tot_times[i];
-                    snap.state = LayerState::from_u8(states[i]);
+                    snap.state = states[i];
                     snap.on_air = on_air[i];
                     snap.beat_marker = beat_markers[i];
 

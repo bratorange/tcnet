@@ -286,8 +286,8 @@ impl ActiveDjController {
         let get_state = |id: LayerId| {
             layers
                 .get(&id)
-                .map(|c| c.state.to_u8())
-                .unwrap_or(0)
+                .map(|c| c.state)
+                .unwrap_or_default()
         };
         let get_beat = |id: LayerId| layers.get(&id).map(|c| c.beat_marker).unwrap_or(0);
         let get_on_air = |id: LayerId| layers.get(&id).map(|c| c.on_air).unwrap_or(0);
@@ -439,7 +439,7 @@ fn build_metrics_data(id: LayerId, ctrl: &LayerControl) -> MetricsData {
         data_type: 2,
         layer_id: id.as_packet_id(),
         _reserved0: Default::default(),
-        layer_state: ctrl.state.to_u8(),
+        layer_state: ctrl.state,
         _reserved1: Default::default(),
         sync_master: 0,
         _reserved2: Default::default(),

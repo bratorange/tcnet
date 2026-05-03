@@ -183,38 +183,6 @@ pub enum LayerState {
 }
 
 impl LayerState {
-    pub fn from_u8(v: u8) -> Self {
-        match v {
-            0 => LayerState::Idle,
-            3 => LayerState::Playing,
-            4 => LayerState::Looping,
-            5 => LayerState::Paused,
-            6 => LayerState::Stopped,
-            7 => LayerState::CueButtonDown,
-            8 => LayerState::PlatterDown,
-            9 => LayerState::FastForward,
-            10 => LayerState::FastReverse,
-            11 => LayerState::Hold,
-            other => LayerState::Unknown(other),
-        }
-    }
-
-    pub fn to_u8(self) -> u8 {
-        match self {
-            LayerState::Idle => 0,
-            LayerState::Playing => 3,
-            LayerState::Looping => 4,
-            LayerState::Paused => 5,
-            LayerState::Stopped => 6,
-            LayerState::CueButtonDown => 7,
-            LayerState::PlatterDown => 8,
-            LayerState::FastForward => 9,
-            LayerState::FastReverse => 10,
-            LayerState::Hold => 11,
-            LayerState::Unknown(v) => v,
-        }
-    }
-
     pub fn is_playing(self) -> bool {
         matches!(self, LayerState::Playing | LayerState::Looping)
     }
@@ -436,7 +404,7 @@ pub struct MetricsData {
     pub data_type: u8,                      // Datatype 2 = Metrics
     pub layer_id: u8,                       // Layer Number
     pub _reserved0: ReservedData<1>,                     // RESERVED
-    pub layer_state: u8,                    // Layer State
+    pub layer_state: LayerState,            // Layer State
     pub _reserved1: ReservedData<1>,                     // RESERVED
     pub sync_master: u8,                    // Sync Master
     pub _reserved2: ReservedData<1>,                     // RESERVED
@@ -730,14 +698,14 @@ pub struct TimePacketData {
     pub lb_beat_marker: u8,                 // Layer B Beatmarker
     pub lm_beat_marker: u8,                 // Layer M Beatmarker
     pub lc_beat_marker: u8,                 // Layer C Beatmarker
-    pub l1_layer_state: u8,                 // Layer 1 Layer State
-    pub l2_layer_state: u8,                 // Layer 2 Layer State
-    pub l3_layer_state: u8,                 // Layer 3 Layer State
-    pub l4_layer_state: u8,                 // Layer 4 Layer State
-    pub la_layer_state: u8,                 // Layer A State
-    pub lb_layer_state: u8,                 // Layer B State
-    pub lm_layer_state: u8,                 // Layer M State
-    pub lc_layer_state: u8,                 // Layer C State
+    pub l1_layer_state: LayerState,         // Layer 1 Layer State
+    pub l2_layer_state: LayerState,         // Layer 2 Layer State
+    pub l3_layer_state: LayerState,         // Layer 3 Layer State
+    pub l4_layer_state: LayerState,         // Layer 4 Layer State
+    pub la_layer_state: LayerState,         // Layer A State
+    pub lb_layer_state: LayerState,         // Layer B State
+    pub lm_layer_state: LayerState,         // Layer M State
+    pub lc_layer_state: LayerState,         // Layer C State
     pub _reserved0: ReservedData<1>,                     // RESERVED
     pub smpte_mode: u8,                     // General SMPTE Mode
     pub l1_timecode: LayerTimecode,         // Layer 1 Timecode
