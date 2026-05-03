@@ -26,7 +26,6 @@ use crate::node::tcnet_packet::{
     management_header, Packet,
 };
 use crate::node::tcnet_packet_serde::{AutoMasterMode, Bpm, Data, LayerId, LayerState, LayerTimecode, MetaData, MetricsData, OptInData, ReservedData, Speed, StatusData, TimePacketData};
-use crate::node::dispatcher::timestamp_micros;
 use crate::node::tcnet_packet_serde::LayerStatus::Variant;
 
 const BROADCAST_ADDR: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 255);

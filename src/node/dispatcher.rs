@@ -1,8 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::ops::Add;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use deku::DekuContainerWrite;
 use tokio::net::UdpSocket;
 use log::{error, info, trace, warn};
 use tokio::time::interval;
@@ -12,7 +14,7 @@ use getifs::best_local_ipv4_addrs;
 use kanal::Receiver;
 use crate::application::{ApplicationMessage, ApplicationNode};
 use crate::node::{ApplicationConfig, DynamicNodeState, ForeignNode};
-use crate::node::tcnet_packet::{opt_in_node_config, opt_in_packet, Packet};
+use crate::node::tcnet_packet::{management_header, opt_in_node_config, opt_in_packet, Packet};
 use crate::node::tcnet_packet_serde::Data::{OptIn, OptOut};
 use crate::node::tcnet_packet_serde::NodeId;
 
@@ -56,6 +58,12 @@ pub async fn start_node(dispatcher: Arc<Dispatcher>) {
         .expect("Could not bind to unicast socket")
     );
 
+    // TODO use the unicast socket for sending out messages to other nodes instead
+    let sender_socket_addr = SocketAddr::new(dispatcher.bind_address.into(), 60_003);
+    let sender_socket = Arc::new(UdpSocket::bind(sender_socket_addr).await
+        .expect("Could not bind to sender socket")
+    );
+
     trace!("Starting network processing");
 
     spawn(broadcast(dispatcher.clone(), broadcast_socket.clone()));
@@ -63,6 +71,7 @@ pub async fn start_node(dispatcher: Arc<Dispatcher>) {
     spawn(listen(dispatcher.clone(), broadcast_socket2.clone()));
     spawn(listen(dispatcher.clone(), time_broadcast_socket.clone()));
     spawn(listen(dispatcher.clone(), unicast_socket.clone()));
+    spawn(send(dispatcher.clone(), sender_socket.clone()));
     spawn(timeout_foreign_nodes(dispatcher.clone()));
 }
 
@@ -75,8 +84,7 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
                 trace!("Received {} bytes from {}", size, src);
                 match Packet::deserialize_packet(&buffer) {
                     Ok(packet) => {
-                        trace!("Received packet:");
-                        trace!("{:?}", packet);
+                        trace!("Received packet: {:?}", packet);
 
                         let src_addr = match src {
                             SocketAddr::V4(addr) => addr.ip().clone(),
@@ -110,7 +118,7 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
                         };
 
                         // send data to its respective application
-                        for application in &dispatcher.application_nodes.write().await.get_mut(&packet.header.node_id){
+                        for application in dispatcher.application_nodes.write().await.values_mut() {
                             let send_result = application.incoming_tx.send(packet.clone());
                             let node_id = application.config.node_id;
                             if send_result.is_err(){
@@ -120,7 +128,7 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
                         }
                     },
                     Err(e) => {
-                        error!("{:?}", e);
+                        error!("Incoming packet deserialization failed: {:?}", e);
                     },
                 }
             },
@@ -128,6 +136,53 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
                 error!("Network error: {}", e);
             },
         };
+    }
+}
+
+async fn send(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) {
+    loop {
+        // collect messages to send
+        for node in dispatcher.application_nodes.write().await.values_mut() {
+            let mut outgoing_messages = Vec::new();
+            if node.outgoing_rx.drain_into(&mut outgoing_messages).is_err() {
+                warn!("Application {} does not listen for messages anymore, removing it from the node", &node.config.node_id);
+                remove_application(&dispatcher, &node.config.node_id).await;
+            }
+
+            for message in outgoing_messages {
+                let data = message.data;
+                let (message_type_id, _) = data.message_type_id();
+
+                let mut dispatcher_state = dispatcher.state.write().await;
+
+                let discovered_nodes = dispatcher_state.discovered_nodes.values()
+                    .map(|foreign_node|
+                        (foreign_node.address, foreign_node.applications.values().map(|foreign_app|
+                                foreign_app.unicast_port
+                            ).collect::<Vec<_>>()
+                        )).collect::<Vec<_>>();
+
+                // TODO For now, we are just sending to all foreign nodes. Implement proper logic!
+                for foreign_node in discovered_nodes {
+                    for foreign_app in foreign_node.1 {
+                        let target_addr = SocketAddrV4::new(foreign_node.0, foreign_app);
+
+                        let seq = dispatcher_state.current_seq;
+                        let header = management_header(&node.config, message_type_id, seq);
+                        let packet = Packet { header, data: data.clone() };
+                        trace!("Sending packet to {}: {:?}", target_addr, packet);
+                        match packet.to_bytes() {
+                            Ok(bytes) => {
+                                socket.send_to(&bytes, target_addr).await.expect("Could not send packet!");
+                            },
+                            Err(err) => error!("Serializing malformed packet {:?} \n caused {}", packet, err),
+                        }
+                        (dispatcher_state.current_seq, _) = dispatcher_state.current_seq.overflowing_add(1);
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 }
 
@@ -163,10 +218,10 @@ async fn broadcast(dispatcher: Arc<Dispatcher>, broadcast_socket: Arc<UdpSocket>
         trace!("Sending opt in packets...");
 
         let mut dispatcher_state = dispatcher.state.write().await;
-        let seq = dispatcher_state.current_seq;
 
         for node in dispatcher.application_nodes.read().await.values() {
             let config = node.config;
+            let seq = dispatcher_state.current_seq;
             let payload = opt_in_packet(&config, &dispatcher_state, seq)
                 .expect("TCNet: Could not serialize opt in packet");
             for addr in &ipv4_addrs {

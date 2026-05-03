@@ -11,8 +11,8 @@ mod active_dj_controller;
 
 // just pass on data for now
 pub struct ApplicationMessage {
-    target_addr: Ipv4Addr,
-    target_node_id: NodeId,
+    pub target_addr: Ipv4Addr,
+    pub target_node_id: NodeId,
     pub data: Data,
 }
 

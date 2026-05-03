@@ -1,12 +1,13 @@
 use crate::node::tcnet_packet_serde::*;
-use deku::{DekuContainerRead, DekuContainerWrite, DekuError};
+use deku::{DekuContainerRead, DekuContainerWrite, DekuError, DekuWrite};
 use std::fmt::Debug;
 use log::trace;
 use crate::into_ascii;
 use crate::node::{ApplicationConfig, DynamicNodeState};
 use crate::node::dispatcher::timestamp_micros;
+use crate::node::tcnet_packet_serde::Data::{AppSpecific, ArtworkFile, BeatGrid, BigWaveform, Control, Cue, ErrorNotification, Keyboard, Meta, Metrics, Mixer, OptIn, OptOut, Request, SmallWaveform, Status, Text, Time, TimeSync};
 
-#[derive(Clone)]
+#[derive(Clone, DekuWrite)]
 pub struct Packet
 {
     pub(crate) header: ManagementHeader,
@@ -31,52 +32,52 @@ impl Packet {
             2 => {
                 let (_, inner) = OptInData::from_bytes(remaining)
                     .map_err(|x| SerdeError::InvalidData(x))?;
-                Data::OptIn(inner)
+                OptIn(inner)
             }
             3 => {
                 let (_, inner) = OptOutData::from_bytes(remaining)
                     .map_err(|x| SerdeError::InvalidData(x))?;
-                Data::OptOut(inner)
+                OptOut(inner)
             }
             5 => {
                 let (_, inner) = StatusData::from_bytes(remaining)
                     .map_err(|x| SerdeError::InvalidData(x))?;
-                Data::Status(inner)
+                Status(inner)
             }
             10 => {
                 let (_, inner) = TimeSyncData::from_bytes(remaining)
                     .map_err(|x| SerdeError::InvalidData(x))?;
-                Data::TimeSync(inner)
+                TimeSync(inner)
             }
             13 => {
                 let (_, inner) = ErrorNotificationData::from_bytes(remaining)
                     .map_err(|x| SerdeError::InvalidData(x))?;
-                Data::ErrorNotification(inner)
+                ErrorNotification(inner)
             }
             20 => {
                 let (_, inner) = RequestData::from_bytes(remaining)
                     .map_err(|x| SerdeError::InvalidData(x))?;
-                Data::Request(inner)
+                Request(inner)
             }
             30 => {
                 let (_, inner) = AppSpecificData::from_bytes(remaining)
                     .map_err(|x| SerdeError::InvalidData(x))?;
-                Data::AppSpecific(inner)
+                AppSpecific(inner)
             }
             101 => {
                 let (_, inner) = ControlData::from_bytes(remaining)
                     .map_err(|x| SerdeError::InvalidData(x))?;
-                Data::Control(inner)
+                Control(inner)
             }
             128 => {
                 let (_, inner) = TextData::from_bytes(remaining)
                     .map_err(|x| SerdeError::InvalidData(x))?;
-                Data::Text(inner)
+                Text(inner)
             }
             132 => {
                 let (_, inner) = KeyboardData::from_bytes(remaining)
                     .map_err(|x| SerdeError::InvalidData(x))?;
-                Data::Keyboard(inner)
+                Keyboard(inner)
             }
             200 => {
                 // Data type is the first byte of the remaining buffer
@@ -86,37 +87,37 @@ impl Packet {
                     2 => {
                         let (_, inner) = MetricsData::from_bytes(remaining)
                             .map_err(|x| SerdeError::InvalidData(x))?;
-                        Data::Metrics(inner)
+                        Metrics(inner)
                     }
                     4 => {
                         let (_, inner) = MetaData::from_bytes(remaining)
                             .map_err(|x| SerdeError::InvalidData(x))?;
-                        Data::Meta(inner)
+                        Meta(inner)
                     }
                     8 => {
                         let (_, inner) = BeatGridHeader::from_bytes(remaining)
                             .map_err(|x| SerdeError::InvalidData(x))?;
-                        Data::BeatGrid(inner)
+                        BeatGrid(inner)
                     }
                     12 => {
                         let (_, inner) = CueData::from_bytes(remaining)
                             .map_err(|x| SerdeError::InvalidData(x))?;
-                        Data::Cue(inner)
+                        Cue(inner)
                     }
                     16 => {
                         let (_, inner) = SmallWaveformData::from_bytes(remaining)
                             .map_err(|x| SerdeError::InvalidData(x))?;
-                        Data::SmallWaveform(inner)
+                        SmallWaveform(inner)
                     }
                     32 => {
                         let (_, inner) = BigWaveformData::from_bytes(remaining)
                             .map_err(|x| SerdeError::InvalidData(x))?;
-                        Data::BigWaveform(inner)
+                        BigWaveform(inner)
                     }
                     150 => {
                         let (_, inner) = MixerData::from_bytes(remaining)
                             .map_err(|x| SerdeError::InvalidData(x))?;
-                        Data::Mixer(inner)
+                        Mixer(inner)
                     }
                     _ => return Err(SerdeError::MessageTypeNotImplemented),
                 }
@@ -124,12 +125,12 @@ impl Packet {
             204 => {
                 let (_, inner) = ArtworkFileData::from_bytes(remaining)
                     .map_err(|x| SerdeError::InvalidData(x))?;
-                Data::ArtworkFile(inner)
+                ArtworkFile(inner)
             }
             254 => {
                 let (_, inner) = TimePacketData::from_bytes(remaining)
                     .map_err(|x| SerdeError::InvalidData(x))?;
-                Data::Time(inner)
+                Time(inner)
             }
             _ => return Err(SerdeError::MessageTypeNotImplemented),
         };
@@ -193,4 +194,33 @@ pub(crate) fn opt_in_packet(app_config: &ApplicationConfig, node_state: &Dynamic
     let ret = [header.to_bytes()?, data.to_bytes()?].concat();
     debug_assert!(ret.len() == 68);
     Ok(ret)
+}
+
+impl Data {
+    pub fn message_type_id(&self) -> (u8, Option<u8>) {
+        match self {
+            OptIn(_) => (2, None),
+            OptOut(_) => (3, None),
+            Status(_) => (5, None),
+            TimeSync(_) => (10, None),
+            ErrorNotification(_) => (13, None),
+            Request(_) => (20, None),
+            AppSpecific(_) => (30, None),
+            Control(_) => (101, None),
+            Text(_) => (128, None),
+            Keyboard(_) => (132, None),
+
+            Metrics(_) => (200, Some(2)),
+            Meta(_) => (200, Some(4)),
+            BeatGrid(_) => (200, Some(8)),
+            Cue(_) => (200, Some(12)),
+            SmallWaveform(_) => (200, Some(16)),
+            BigWaveform(_) => (200, Some(32)),
+            Mixer(_) => (200, Some(150)),
+
+            ArtworkFile(_) => (204, None),
+            // AppSpecific(_) => 254, None)
+            Time(_) => (254, None),
+        }
+    }
 }

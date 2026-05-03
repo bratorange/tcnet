@@ -1,9 +1,10 @@
 use crate::node::dispatcher::add_application;
-use crate::node::tcnet_packet_serde::{NodeOptions, NodeType};
+use crate::node::tcnet_packet_serde::{LayerId, NodeOptions, NodeType, RequestDataType};
 use crate::node::{ApplicationConfig, DynamicNodeState};
 use node::dispatcher::{Dispatcher, start_node};
 use std::net::Ipv4Addr;
 use std::sync::Arc;
+use log::info;
 use tokio::runtime::Runtime;
 use tokio::sync::RwLock;
 use crate::application::dj_controller_view::DjControllerView;
@@ -54,8 +55,14 @@ impl TCNetClient {
             ).await)
         });
         runtime.spawn(async move {
+            let mut i = 0;
             loop {
                 temp_test_app.process_available();
+                if i % 100 == 0 {
+                    info!("Requesting BeatGridData");
+                    temp_test_app.request_layer_data(RequestDataType::BeatGridData, LayerId::L1)
+                }
+                i+=1;
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
         });
