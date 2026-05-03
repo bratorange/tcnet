@@ -134,7 +134,7 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
 pub async fn add_application(
     dispatcher: Arc<Dispatcher>,
     application_config: ApplicationConfig,
-) -> (Receiver<ApplicationMessage>, kanal::Sender<ApplicationMessage>) {
+) -> (Receiver<Packet>, kanal::Sender<ApplicationMessage>) {
     let (incoming_tx, incoming_rx) = kanal::bounded(100);
     let (outgoing_tx, outgoing_rx) = kanal::bounded(100);
     let application_node = ApplicationNode { dispatcher: dispatcher.clone(), config: application_config, incoming_tx, outgoing_rx };

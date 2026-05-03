@@ -1,6 +1,5 @@
 use crate::into_ascii;
 use crate::node::tcnet_packet_serde::{AsciiString, NodeId, NodeOptions, NodeType};
-use deku::DekuContainerWrite;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 pub(crate) mod tcnet_packet_serde;

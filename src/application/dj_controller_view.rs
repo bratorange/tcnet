@@ -5,12 +5,12 @@
 //! packets and assembles a coherent snapshot of all eight layer slots.
 
 use std::collections::HashMap;
-use kanal::Receiver;
+use std::net::Ipv4Addr;
+use kanal::{Receiver, Sender};
 use crate::application::ApplicationMessage;
-use crate::application::domain::{Bpm, LayerId, LayerState, Speed, SmpteMode};
-use crate::node::tcnet_packet_serde::{Data, MixerChannel};
-
-
+use crate::node::tcnet_packet::Packet;
+use crate::node::tcnet_packet_serde::{Bpm, Data, LayerId, LayerState, MixerChannel, RequestData, RequestDataType, SmpteMode, Speed};
+use crate::node::tcnet_packet_serde::Data::Request;
 // ---------------------------------------------------------------------------
 // Mixer master snapshot
 // ---------------------------------------------------------------------------
@@ -223,12 +223,12 @@ impl LayerSnapshot {
 pub struct DjControllerView {
     pub layers: HashMap<LayerId, LayerSnapshot>,
     pub mixer_state: MixerSnapshot,
-    rx: Receiver<ApplicationMessage>,
-    tx: kanal::Sender<ApplicationMessage>,
+    rx: Receiver<Packet>,
+    tx: Sender<ApplicationMessage>,
 }
 
 impl DjControllerView {
-    pub fn new((rx, tx): (Receiver<ApplicationMessage>, kanal::Sender<ApplicationMessage>)) -> Self {
+    pub fn new((rx, tx): (Receiver<Packet>, Sender<ApplicationMessage>)) -> Self {
         let mut layers = HashMap::new();
         let mixer_state = MixerSnapshot::default();
         for id in LayerId::ALL {
@@ -246,7 +246,7 @@ impl DjControllerView {
         }
     }
 
-    fn apply(&mut self, packet: ApplicationMessage) {
+    fn apply(&mut self, packet: Packet) {
         match packet.data {
             // ---------------------------------------------------------------
             // Status packet: source, track-id, layer name (~1 Hz)
@@ -425,6 +425,16 @@ impl DjControllerView {
 
             _ => {}
         }
+    }
+
+    pub fn request_layer_data(&self, data_type: RequestDataType, layer_id: LayerId) {
+        let message = ApplicationMessage {
+            // TODO keep track of the sending mixer node
+            target_addr: Ipv4Addr::new(127, 0, 0, 1),
+            target_node_id: 0,
+            data: Request(RequestData { data_type, layer: layer_id }),
+        };
+        self.tx.send(message);
     }
 
     /// Get the layer that is currently the sync master, if any.

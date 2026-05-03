@@ -20,13 +20,12 @@ use tokio::sync::RwLock;
 use tokio::time::interval;
 use kanal::AsyncSender;
 use log::error;
-use crate::application::domain::{Bpm, LayerId, LayerState, Speed};
 use crate::node::ApplicationConfig;
 use crate::node::dispatcher::OutgoingMessage;
 use crate::node::tcnet_packet::{
     management_header, Packet,
 };
-use crate::node::tcnet_packet_serde::{AutoMasterMode, Data, LayerTimecode, MetaData, MetricsData, OptInData, ReservedData, StatusData, TimePacketData};
+use crate::node::tcnet_packet_serde::{AutoMasterMode, Bpm, Data, LayerId, LayerState, LayerTimecode, MetaData, MetricsData, OptInData, ReservedData, Speed, StatusData, TimePacketData};
 use crate::node::dispatcher::timestamp_micros;
 use crate::node::tcnet_packet_serde::LayerStatus::Variant;
 
