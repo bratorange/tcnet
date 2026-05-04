@@ -497,7 +497,7 @@ pub struct CueData {
 #[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
 pub struct SmallWaveformData {
     data_type: u8,                      // Datatype 16 = Small Waveform
-    layer_id: u8,                       // Layer Number
+    pub layer_id: u8,                   // Layer Number
     #[deku(endian = "little")]
     data_size: u32,                     // Total Datasize (2400)
     #[deku(endian = "little")]
@@ -513,7 +513,7 @@ pub struct SmallWaveformData {
 pub struct BigWaveformData {
     // TODO how do we ensure that data type is correct?
     data_type: u8,                      // Datatype 32 = Big Waveform
-    layer_id: u8,                       // Layer Number
+    pub layer_id: u8,                   // Layer Number
     #[deku(endian = "little")]
     data_size: u32,                     // Total Data size
     #[deku(endian = "little")]
@@ -616,7 +616,7 @@ pub struct MixerData {
 #[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
 pub struct ArtworkFileData {
     data_type: u8,                      // Datatype 128 = Low Res Artwork File
-    layer_id: u8,                       // Layer Number
+    pub layer_id: u8,                   // Layer Number
     #[deku(endian = "little")]
     data_size: u32,                     // Total Data size
     #[deku(endian = "little")]

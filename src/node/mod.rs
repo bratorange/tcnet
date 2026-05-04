@@ -2,15 +2,18 @@ use crate::into_ascii;
 use crate::node::tcnet_packet_serde::{AsciiString, NodeId, NodeOptions, NodeType};
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
+pub(crate) mod dj_controller;
 pub(crate) mod tcnet_packet_serde;
 pub(crate) mod tcnet_packet;
 pub mod dispatcher;
 
-#[derive(Clone)]
+use crate::node::dj_controller::DjController;
+
 pub(crate) struct ForeignNode {
     pub last_seen: u64,
     pub address: Ipv4Addr,
-    pub applications: HashMap<NodeId, ApplicationConfig>
+    pub applications: HashMap<NodeId, ApplicationConfig>,
+    pub dj_controller: Option<DjController>,
 }
 
 #[derive(Default)]
@@ -31,10 +34,9 @@ pub struct ApplicationConfig {
     pub application_bug_version: u8,
     pub node_name: AsciiString<8>,
     pub node_options: NodeOptions,
-    pub unicast_port: u16, // TODO: only used for foreign nodes, make this more coherent
+    pub unicast_port: u16,
 }
 
-// TODO dont use Default here
 impl Default for ApplicationConfig {
     fn default() -> Self {
         Self {
@@ -51,4 +53,3 @@ impl Default for ApplicationConfig {
         }
     }
 }
-

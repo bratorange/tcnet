@@ -21,3 +21,4 @@ env_logger = "0.11.9"
 clap = { version = "4.5.60", features = ["derive"] }
 getifs = "0.4.0"
 kanal = "0.1.1"
+triple_buffer = "9"

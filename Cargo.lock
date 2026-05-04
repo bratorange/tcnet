@@ -182,6 +182,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b05b61dc5112cbb17e4b6cd61790d9845d13888356391624cbe7e41efeac1e75"
 
 [[package]]
+name = "crossbeam-utils"
+version = "0.8.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
+
+[[package]]
 name = "darling"
 version = "0.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -826,6 +832,7 @@ dependencies = [
  "kanal",
  "log",
  "tokio",
+ "triple_buffer",
 ]
 
 [[package]]
@@ -934,6 +941,15 @@ checksum = "dd69c5aa8f924c7519d6372789a74eac5b94fb0f8fcf0d4a97eb0bfc3e785f39"
 dependencies = [
  "serde",
  "stable_deref_trait",
+]
+
+[[package]]
+name = "triple_buffer"
+version = "9.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e875ab7068a75b74f419da453927e05527c36f0001b3c7aad3ce443640683487"
+dependencies = [
+ "crossbeam-utils",
 ]
 
 [[package]]
