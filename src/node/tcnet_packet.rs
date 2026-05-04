@@ -29,7 +29,6 @@ impl Packet {
             .map_err(|x| SerdeError::InvalidHeader(x))?;
         let packet_type = header.message_type;
 
-        trace!("header: {:?}", header);
         let data = match packet_type {
             2 => {
                 let (_, inner) = OptInData::from_bytes(remaining)
