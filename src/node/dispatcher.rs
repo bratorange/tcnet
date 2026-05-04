@@ -15,7 +15,7 @@ use kanal::Receiver;
 use crate::application::{ApplicationMessage, ApplicationNode};
 use crate::node::{ApplicationConfig, DynamicNodeState, ForeignNode};
 use crate::node::tcnet_packet::{management_header, opt_in_node_config, opt_in_packet, Packet};
-use crate::node::tcnet_packet_serde::Data::{OptIn, OptOut};
+use crate::node::tcnet_packet::Data::{OptIn, OptOut};
 use crate::node::tcnet_packet_serde::NodeId;
 
 pub struct OutgoingMessage {

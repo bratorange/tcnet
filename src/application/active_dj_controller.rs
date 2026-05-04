@@ -22,10 +22,9 @@ use kanal::AsyncSender;
 use log::error;
 use crate::node::ApplicationConfig;
 use crate::node::dispatcher::OutgoingMessage;
-use crate::node::tcnet_packet::{
-    management_header, Packet,
-};
-use crate::node::tcnet_packet_serde::{AutoMasterMode, Bpm, Data, LayerId, LayerState, LayerTimecode, MetaData, MetricsData, OptInData, ReservedData, Speed, StatusData, TimePacketData};
+use crate::node::tcnet_packet::{management_header, Data, Packet};
+use crate::node::tcnet_packet::Data::*;
+use crate::node::tcnet_packet_serde::{AutoMasterMode, Bpm, LayerId, LayerState, LayerTimecode, MetaData, MetricsData, OptInData, ReservedData, Speed, StatusData, TimePacketData};
 use crate::node::tcnet_packet_serde::LayerStatus::Variant;
 
 const BROADCAST_ADDR: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 255);
@@ -470,19 +469,19 @@ fn name_bytes(layers: &HashMap<LayerId, LayerControl>, id: LayerId) -> [u8; 16] 
 
 fn message_type_for(data: &Data) -> u8 {
     match data {
-        Data::OptIn(_) => 2,
-        Data::OptOut(_) => 3,
-        Data::Status(_) => 5,
-        Data::TimeSync(_) => 10,
-        Data::ErrorNotification(_) => 13,
-        Data::Request(_) => 20,
-        Data::AppSpecific(_) => 30,
-        Data::Control(_) => 101,
-        Data::Text(_) => 128,
-        Data::Keyboard(_) => 132,
-        Data::Metrics(_) | Data::Meta(_) | Data::BeatGrid(_) | Data::Cue(_)
-        | Data::SmallWaveform(_) | Data::BigWaveform(_) | Data::Mixer(_) => 200,
-        Data::ArtworkFile(_) => 204,
-        Data::Time(_) => 254,
+        OptIn(_) => 2,
+        OptOut(_) => 3,
+        Status(_) => 5,
+        TimeSync(_) => 10,
+        ErrorNotification(_) => 13,
+        Request(_) => 20,
+        AppSpecific(_) => 30,
+        Control(_) => 101,
+        Text(_) => 128,
+        Keyboard(_) => 132,
+        Metrics(_) | Data::Meta(_) | Data::BeatGrid(_) | Data::Cue(_)
+        | SmallWaveform(_) | BigWaveform(_) | Data::Mixer(_) => 200,
+        ArtworkFile(_) => 204,
+        Time(_) => 254,
     }
 }

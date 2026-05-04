@@ -1,10 +1,10 @@
 use crate::node::dispatcher::Dispatcher;
-use crate::node::tcnet_packet::Packet;
+use crate::node::tcnet_packet::{Data, Packet};
 use crate::node::ApplicationConfig;
 use kanal::{Receiver, Sender};
 use std::net::Ipv4Addr;
 use std::sync::Arc;
-use crate::node::tcnet_packet_serde::{Data, NodeId};
+use crate::node::tcnet_packet_serde::NodeId;
 
 pub mod dj_controller_view;
 mod active_dj_controller;

@@ -8,9 +8,10 @@ use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use kanal::{Receiver, Sender};
 use crate::application::ApplicationMessage;
-use crate::node::tcnet_packet::Packet;
-use crate::node::tcnet_packet_serde::{Bpm, Data, LayerId, LayerState, MixerChannel, RequestData, RequestDataType, SmpteMode, Speed};
-use crate::node::tcnet_packet_serde::Data::Request;
+use crate::node::tcnet_packet::{Data, Packet};
+use crate::node::tcnet_packet::Data::Request;
+use crate::node::tcnet_packet_serde::{Bpm, LayerId, LayerState, MixerChannel, RequestData, RequestDataType, SmpteMode, Speed};
+
 // ---------------------------------------------------------------------------
 // Mixer master snapshot
 // ---------------------------------------------------------------------------

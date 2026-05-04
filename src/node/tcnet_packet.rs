@@ -1,11 +1,13 @@
 use crate::node::tcnet_packet_serde::*;
-use deku::{DekuContainerRead, DekuContainerWrite, DekuError, DekuWrite};
+use deku::{DekuContainerRead, DekuContainerWrite, DekuError, DekuWrite, DekuWriter};
 use std::fmt::Debug;
+use std::io::{Seek, Write};
+use deku::prelude::Writer;
 use log::trace;
 use crate::into_ascii;
 use crate::node::{ApplicationConfig, DynamicNodeState};
 use crate::node::dispatcher::timestamp_micros;
-use crate::node::tcnet_packet_serde::Data::{AppSpecific, ArtworkFile, BeatGrid, BigWaveform, Control, Cue, ErrorNotification, Keyboard, Meta, Metrics, Mixer, OptIn, OptOut, Request, SmallWaveform, Status, Text, Time, TimeSync};
+use crate::node::tcnet_packet::Data::*;
 
 #[derive(Clone, DekuWrite)]
 pub struct Packet
@@ -221,6 +223,55 @@ impl Data {
             ArtworkFile(_) => (204, None),
             // AppSpecific(_) => 254, None)
             Time(_) => (254, None),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum Data {
+    OptIn(OptInData),
+    OptOut(OptOutData),
+    Status(StatusData),
+    TimeSync(TimeSyncData),
+    ErrorNotification(ErrorNotificationData),
+    Request(RequestData),
+    AppSpecific(AppSpecificData),
+    Control(ControlData),
+    Text(TextData),
+    Keyboard(KeyboardData),
+    Metrics(MetricsData),
+    Meta(MetaData),
+    BeatGrid(BeatGridHeader),
+    Cue(CueData),
+    SmallWaveform(SmallWaveformData),
+    BigWaveform(BigWaveformData),
+    Mixer(MixerData),
+    ArtworkFile(ArtworkFileData),
+    Time(TimePacketData),
+}
+
+impl DekuWriter for Data{
+    fn to_writer<W: Write + Seek>(&self, writer: &mut Writer<W>, ctx: ()) -> Result<(), DekuError> {
+        match self {
+            OptIn(data) => data.to_writer(writer, ctx),
+            OptOut(data) => data.to_writer(writer, ctx),
+            Status(data) => data.to_writer(writer, ctx),
+            TimeSync(data) => data.to_writer(writer, ctx),
+            ErrorNotification(data) => data.to_writer(writer, ctx),
+            Request(data) => data.to_writer(writer, ctx),
+            AppSpecific(data) => data.to_writer(writer, ctx),
+            Control(data) => data.to_writer(writer, ctx),
+            Text(data) => data.to_writer(writer, ctx),
+            Keyboard(data) => data.to_writer(writer, ctx),
+            Metrics(data) => data.to_writer(writer, ctx),
+            Meta(data) => data.to_writer(writer, ctx),
+            BeatGrid(data) => data.to_writer(writer, ctx),
+            Cue(data) => data.to_writer(writer, ctx),
+            SmallWaveform(data) => data.to_writer(writer, ctx),
+            BigWaveform(data) => data.to_writer(writer, ctx),
+            Mixer(data) => data.to_writer(writer, ctx),
+            ArtworkFile(data) => data.to_writer(writer, ctx),
+            Time(data) => data.to_writer(writer, ctx),
         }
     }
 }

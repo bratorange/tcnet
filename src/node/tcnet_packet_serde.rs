@@ -4,8 +4,6 @@ use bitflags::bitflags;
 use deku::{DekuError, DekuRead, DekuReader, DekuWrite, DekuWriter};
 use deku::ctx::Order;
 use deku::prelude::{Reader, Writer};
-use crate::node::tcnet_packet_serde::Data::*;
-use crate::node::tcnet_packet_serde::RequestDataType::LowResArtworkFile;
 
 pub type NodeId = u16;
 
@@ -727,47 +725,4 @@ pub struct TimePacketData {
     pub lb_on_air: u8,                      // Layer B OnAir State
     pub lm_on_air: u8,                      // Layer M OnAir State
     pub lc_on_air: u8,                      // Layer C OnAir State
-}
-
-#[derive(Debug, Clone, DekuWrite)]
-#[deku(id_type = "u8")]
-pub enum Data {
-    #[deku(id = 2)]
-    OptIn(OptInData),
-    #[deku(id = 3)]
-    OptOut(OptOutData),
-    #[deku(id = 5)]
-    Status(StatusData),
-    #[deku(id = 10)]
-    TimeSync(TimeSyncData),
-    #[deku(id = 13)]
-    ErrorNotification(ErrorNotificationData),
-    #[deku(id = 20)]
-    Request(RequestData),
-    #[deku(id = 30)]
-    AppSpecific(AppSpecificData),
-    #[deku(id = 101)]
-    Control(ControlData),
-    #[deku(id = 128)]
-    Text(TextData),
-    #[deku(id = 132)]
-    Keyboard(KeyboardData),
-    #[deku(id = 200)]
-    Metrics(MetricsData),
-    #[deku(id = 200)]
-    Meta(MetaData),
-    #[deku(id = 200)]
-    BeatGrid(BeatGridHeader),
-    #[deku(id = 200)]
-    Cue(CueData),
-    #[deku(id = 200)]
-    SmallWaveform(SmallWaveformData),
-    #[deku(id = 200)]
-    BigWaveform(BigWaveformData),
-    #[deku(id = 200)]
-    Mixer(MixerData),
-    #[deku(id = 204)]
-    ArtworkFile(ArtworkFileData),
-    #[deku(id = 254)]
-    Time(TimePacketData),
 }
