@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::ops::Add;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use deku::DekuContainerWrite;
@@ -58,12 +57,6 @@ pub async fn start_node(dispatcher: Arc<Dispatcher>) {
         .expect("Could not bind to unicast socket")
     );
 
-    // TODO use the unicast socket for sending out messages to other nodes instead
-    let sender_socket_addr = SocketAddr::new(dispatcher.bind_address.into(), 60_003);
-    let sender_socket = Arc::new(UdpSocket::bind(sender_socket_addr).await
-        .expect("Could not bind to sender socket")
-    );
-
     trace!("Starting network processing");
 
     spawn(broadcast(dispatcher.clone(), broadcast_socket.clone()));
@@ -71,7 +64,7 @@ pub async fn start_node(dispatcher: Arc<Dispatcher>) {
     spawn(listen(dispatcher.clone(), broadcast_socket2.clone()));
     spawn(listen(dispatcher.clone(), time_broadcast_socket.clone()));
     spawn(listen(dispatcher.clone(), unicast_socket.clone()));
-    spawn(send(dispatcher.clone(), sender_socket.clone()));
+    spawn(send(dispatcher.clone(), unicast_socket.clone()));
     spawn(timeout_foreign_nodes(dispatcher.clone()));
 }
 
