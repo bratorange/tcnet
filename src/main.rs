@@ -74,6 +74,8 @@ fn main() {
     };
 
     loop {
+        let nodes = client.active_nodes().to_vec();
+        println!("Discovered {} node(s)…", nodes.len());
         sleep(Duration::from_millis(500));
         print_state(&mut view);
     }

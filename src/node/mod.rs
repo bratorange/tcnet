@@ -41,7 +41,7 @@ impl Default for ApplicationConfig {
     fn default() -> Self {
         Self {
             node_id: 0,
-            node_type: NodeType::Auto,
+            node_type: NodeType::Slave,
             vendor_name: into_ascii!("Somevendor______"),
             application_name: into_ascii!("Someapplication_"),
             application_major_version: 0,
