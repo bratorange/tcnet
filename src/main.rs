@@ -2,6 +2,7 @@ use clap::Parser;
 use std::net::Ipv4Addr;
 use std::thread::sleep;
 use std::time::Duration;
+use log::trace;
 use tcnet::{ApplicationConfig, DjControllerView, TCNetClient};
 
 #[derive(Parser)]
@@ -78,5 +79,6 @@ fn main() {
         println!("Discovered {} node(s)…", nodes.len());
         sleep(Duration::from_millis(500));
         print_state(&mut view);
+        trace!("{:?}", view.get_mixer());
     }
 }
