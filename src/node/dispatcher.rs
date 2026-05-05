@@ -192,18 +192,23 @@ async fn send(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) {
         for msg in msgs {
             let target = SocketAddrV4::new(msg.destination, msg.unicast_port);
             let (msg_type_id, _) = msg.data.message_type_id();
-            let mut state = dispatcher.state.write().await;
-            let seq = state.current_seq;
-            let header = management_header(&dispatcher.node_config, msg_type_id, seq);
-            let packet = Packet { header, data: msg.data };
-            trace!("Sending packet to {}: {:?}", target, packet);
-            match packet.to_bytes() {
+            // Serialize while holding the lock, release before sending.
+            let send_result = {
+                let mut state = dispatcher.state.write().await;
+                let seq = state.current_seq;
+                let header = management_header(&dispatcher.node_config, msg_type_id, seq);
+                let packet = Packet { header, data: msg.data };
+                trace!("Sending packet to {}: {:?}", target, packet);
+                let bytes = packet.to_bytes();
+                (state.current_seq, _) = state.current_seq.overflowing_add(1);
+                bytes
+            };
+            match send_result {
                 Ok(bytes) => {
                     socket.send_to(&bytes, target).await.expect("Could not send packet!");
                 }
-                Err(err) => error!("Serializing malformed packet {:?} \n caused {}", packet, err),
+                Err(err) => error!("Serializing malformed packet, caused {}", err),
             }
-            (state.current_seq, _) = state.current_seq.overflowing_add(1);
         }
 
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -221,14 +226,20 @@ async fn broadcast(dispatcher: Arc<Dispatcher>, broadcast_socket: Arc<UdpSocket>
         tick.tick().await;
         trace!("Sending opt in packets...");
 
-        let mut dispatcher_state = dispatcher.state.write().await;
-        let config = dispatcher.node_config;
-        let seq = dispatcher_state.current_seq;
-        let payload = opt_in_packet(&config, &dispatcher_state, seq)
-            .expect("TCNet: Could not serialize opt in packet");
+        // Serialize while holding the lock, then release before sending so
+        // listener tasks are not starved during the (potentially slow) send_to.
+        let payload = {
+            let mut dispatcher_state = dispatcher.state.write().await;
+            let config = dispatcher.node_config;
+            let seq = dispatcher_state.current_seq;
+            let p = opt_in_packet(&config, &dispatcher_state, seq)
+                .expect("TCNet: Could not serialize opt in packet");
+            (dispatcher_state.current_seq, _) = dispatcher_state.current_seq.overflowing_add(1);
+            p
+        };
+
         for addr in &ipv4_addrs {
             let _ = broadcast_socket.send_to(&payload, addr).await;
-            (dispatcher_state.current_seq, _) = dispatcher_state.current_seq.overflowing_add(1);
         }
 
         trace!("Sent opt in packet");
@@ -238,17 +249,19 @@ async fn broadcast(dispatcher: Arc<Dispatcher>, broadcast_socket: Arc<UdpSocket>
 async fn timeout_foreign_nodes(node: Arc<Dispatcher>) {
     let mut tick = interval(Duration::from_secs(1));
     loop {
-        let secs = timestamp_secs();
-        let mut state = node.state.write().await;
-        state.discovered_nodes.retain(|_, foreign_node| {
-            let keep = foreign_node.last_seen + 10 > secs;
-            if !keep {
-                warn!("Node {} timed out", foreign_node.address);
-            }
-            keep
-        });
-        publish_nodes_snapshot(&state, &node.nodes_buf_input);
         tick.tick().await;
+        let secs = timestamp_secs();
+        {
+            let mut state = node.state.write().await;
+            state.discovered_nodes.retain(|_, foreign_node| {
+                let keep = foreign_node.last_seen + 10 > secs;
+                if !keep {
+                    warn!("Node {} timed out", foreign_node.address);
+                }
+                keep
+            });
+            publish_nodes_snapshot(&state, &node.nodes_buf_input);
+        }
     }
 }
 

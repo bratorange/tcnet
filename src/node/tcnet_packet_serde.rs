@@ -527,7 +527,7 @@ pub struct BigWaveformData {
 }
 
 // DATA PACKET - MIXER DATA (Message Type 200, Data Type 150)
-#[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
+#[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone, Copy)]
 pub struct MixerChannel {
     pub source_select: u8,                  // Channel Source Select
     pub audio_level: u8,                    // Channel Audio Level
@@ -647,7 +647,7 @@ pub struct AppSpecificData {
 }
 
 // TIME PACKET (Message Type 254)
-#[derive(Debug, Clone, PartialEq, DekuRead, DekuWrite)]
+#[derive(Debug, Clone, Copy, PartialEq, DekuRead, DekuWrite)]
 pub struct LayerTimecode {
     pub smpte_mode: u8,                     // Layer SMPTE Mode (24/25/29/30)
     pub state: u8,                          // Time Code State (0=Stopped, 1=Running, 2=Force Resync)

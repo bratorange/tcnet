@@ -9,6 +9,8 @@ use crate::node::tcnet_packet_serde::NodeId;
 
 pub mod node;
 mod dj_controller_view;
+#[cfg(test)]
+mod tests;
 
 pub use dj_controller_view::DjControllerView;
 pub use node::dj_controller::{

@@ -170,10 +170,19 @@ impl LayerSnapshot {
 // Triple buffer payload
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct DjControllerState {
     pub layers: Vec<LayerSnapshot>,
     pub mixer: MixerSnapshot,
+}
+
+impl Default for DjControllerState {
+    fn default() -> Self {
+        Self {
+            layers: LayerId::ALL.iter().map(|_| LayerSnapshot::default()).collect(),
+            mixer: MixerSnapshot::default(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -368,9 +377,11 @@ async fn dj_controller_task(
             apply_packet(packet, &mut layers, &mut mixer);
         }
 
-        // write updated state to triple buffer
+        // write updated state to triple buffer; order matches LayerId::ALL
         buf_input.write(DjControllerState {
-            layers: layers.values().cloned().collect(),
+            layers: LayerId::ALL.iter()
+                .map(|id| layers.get(id).cloned().unwrap_or_default())
+                .collect(),
             mixer: mixer.clone(),
         });
 
