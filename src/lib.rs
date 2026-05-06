@@ -5,9 +5,13 @@ use tokio::sync::RwLock;
 use crate::node::{DynamicNodeState, ForeignNode};
 use crate::node::dispatcher::{Dispatcher, start_node};
 use crate::node::dj_controller::OutgoingRequest;
+use crate::node::tcnet_packet::Data;
 use crate::node::tcnet_packet_serde::NodeId;
 
 pub mod node;
+pub mod active_node;
+#[cfg(feature = "simulator")]
+pub mod simulator;
 mod dj_controller_view;
 #[cfg(test)]
 mod tests;
@@ -17,6 +21,7 @@ pub use node::dj_controller::{
     ChannelSnapshot, DjControllerState, LayerSnapshot, MixerSnapshot, TimeoutError,
 };
 pub use node::ApplicationConfig;
+pub use active_node::ActiveDJNode;
 
 const SPEC_MAJOR_VERSION: u8 = 3;
 const SPEC_MINOR_VERSION: u8 = 6;
@@ -46,6 +51,8 @@ pub struct TCNetClient {
     dispatcher: Arc<Dispatcher>,
     nodes_output: triple_buffer::Output<Vec<ForeignNodeInfo>>,
     cached_nodes: Vec<ForeignNodeInfo>,
+    active_broadcast_tx: kanal::Sender<Data>,
+    active_time_tx: kanal::Sender<Data>,
 }
 
 impl TCNetClient {
@@ -60,6 +67,8 @@ impl TCNetClient {
         let (outgoing_tx, outgoing_rx) = kanal::bounded::<OutgoingRequest>(256);
         let (nodes_input, nodes_output) =
             triple_buffer::triple_buffer(&Vec::<ForeignNodeInfo>::new());
+        let (active_broadcast_tx, active_broadcast_rx) = kanal::bounded::<Data>(512);
+        let (active_time_tx, active_time_rx) = kanal::bounded::<Data>(512);
 
         let dispatcher = Arc::new(Dispatcher {
             node_config,
@@ -69,6 +78,8 @@ impl TCNetClient {
             outgoing_tx,
             outgoing_rx,
             nodes_buf_input: Arc::new(Mutex::new(nodes_input)),
+            active_broadcast_rx,
+            active_time_rx,
         });
 
         runtime.spawn(start_node(dispatcher.clone()));
@@ -78,12 +89,12 @@ impl TCNetClient {
             dispatcher,
             nodes_output,
             cached_nodes: Vec::new(),
+            active_broadcast_tx,
+            active_time_tx,
         }
     }
 
     /// Returns the latest known set of active foreign nodes.
-    ///
-    /// This is a lock-free read from the triple buffer.
     pub fn active_nodes(&mut self) -> &[ForeignNodeInfo] {
         self.cached_nodes = self.nodes_output.read().clone();
         &self.cached_nodes
@@ -91,9 +102,6 @@ impl TCNetClient {
 
     /// Returns a `DjControllerView` for the node at `addr` if DJ-type packets
     /// have been received from it.
-    ///
-    /// This moves the triple buffer read handle into the returned view, so it
-    /// can only be called once per address.
     pub fn get_controller_view(&self, addr: Ipv4Addr) -> Option<DjControllerView> {
         self._runtime.block_on(async {
             let mut state = self.dispatcher.state.write().await;
@@ -102,5 +110,14 @@ impl TCNetClient {
             let buf = ctrl.buf_output.take()?;
             Some(DjControllerView::new(buf, ctrl.request_tx.clone()))
         })
+    }
+
+    /// Creates an `ActiveDJNode` that broadcasts this node's state over TCNet.
+    pub fn create_active_node(&self) -> ActiveDJNode {
+        ActiveDJNode::new(
+            self.active_broadcast_tx.clone(),
+            self.active_time_tx.clone(),
+            &self._runtime,
+        )
     }
 }

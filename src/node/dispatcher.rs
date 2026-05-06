@@ -25,6 +25,10 @@ pub struct Dispatcher {
     pub(crate) outgoing_tx: kanal::Sender<OutgoingRequest>,
     pub(crate) outgoing_rx: kanal::Receiver<OutgoingRequest>,
     pub(crate) nodes_buf_input: Arc<Mutex<triple_buffer::Input<Vec<ForeignNodeInfo>>>>,
+    /// Packets queued here are broadcast on port 60000 (Status, Metrics, Meta, Mixer).
+    pub(crate) active_broadcast_rx: kanal::Receiver<Data>,
+    /// Packets queued here are broadcast on port 60001 (Time).
+    pub(crate) active_time_rx: kanal::Receiver<Data>,
 }
 
 pub async fn start_node(dispatcher: Arc<Dispatcher>) {
@@ -61,6 +65,7 @@ pub async fn start_node(dispatcher: Arc<Dispatcher>) {
     spawn(listen(dispatcher.clone(), unicast_socket.clone()));
     spawn(send(dispatcher.clone(), unicast_socket.clone()));
     spawn(timeout_foreign_nodes(dispatcher.clone()));
+    spawn(active_broadcast(dispatcher.clone(), broadcast_socket.clone(), time_broadcast_socket.clone()));
 }
 
 fn is_dj_packet(data: &Data) -> bool {
@@ -262,6 +267,59 @@ async fn timeout_foreign_nodes(node: Arc<Dispatcher>) {
             });
             publish_nodes_snapshot(&state, &node.nodes_buf_input);
         }
+    }
+}
+
+/// Drains packets queued by `ActiveDJNode` and broadcasts them on the appropriate sockets.
+async fn active_broadcast(
+    dispatcher: Arc<Dispatcher>,
+    socket_60000: Arc<UdpSocket>,
+    socket_60001: Arc<UdpSocket>,
+) {
+    let broadcast_addrs_60000: HashSet<SocketAddr> = best_local_ipv4_addrs()
+        .expect("Could not get local IPv4 addresses")
+        .iter()
+        .map(|net| SocketAddr::V4(SocketAddrV4::new(net.broadcast(), 60_000)))
+        .collect();
+    let broadcast_addrs_60001: HashSet<SocketAddr> = best_local_ipv4_addrs()
+        .expect("Could not get local IPv4 addresses")
+        .iter()
+        .map(|net| SocketAddr::V4(SocketAddrV4::new(net.broadcast(), 60_001)))
+        .collect();
+
+    let mut seq: u8 = 128; // use a distinct range from the main seq counter
+
+    loop {
+        let mut msgs: Vec<Data> = Vec::new();
+        let _ = dispatcher.active_broadcast_rx.drain_into(&mut msgs);
+        for data in msgs {
+            let (msg_type_id, _) = data.message_type_id();
+            let header = management_header(&dispatcher.node_config, msg_type_id, seq);
+            seq = seq.wrapping_add(1);
+            let packet = Packet { header, data };
+            if let Ok(bytes) = packet.to_bytes() {
+                for addr in &broadcast_addrs_60000 {
+                    let _ = socket_60000.send_to(&bytes, addr).await;
+                }
+            }
+        }
+
+        let mut time_msgs: Vec<Data> = Vec::new();
+        let _ = dispatcher.active_time_rx.drain_into(&mut time_msgs);
+        for data in time_msgs {
+            let (msg_type_id, _) = data.message_type_id();
+            let header = management_header(&dispatcher.node_config, msg_type_id, seq);
+            seq = seq.wrapping_add(1);
+            let packet = Packet { header, data };
+            if let Ok(bytes) = packet.to_bytes() {
+                for addr in &broadcast_addrs_60001 {
+                    trace!("Sending packet to {}: {:?}", addr, packet);
+                    let _ = socket_60001.send_to(&bytes, addr).await;
+                }
+            }
+        }
+
+        tokio::time::sleep(Duration::from_millis(5)).await;
     }
 }
 
