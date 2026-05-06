@@ -12,15 +12,14 @@ use tokio::sync::RwLock;
 use getifs::best_local_ipv4_addrs;
 use crate::node::{ApplicationConfig, DynamicNodeState, ForeignNode};
 use crate::node::dj_controller::{DjController, OutgoingRequest};
-use crate::node::tcnet_packet::{management_header, opt_in_node_config, opt_in_packet, Packet};
+use crate::node::tcnet_packet::{management_header, node_config_from_opt_in, opt_in_packet, Packet};
 use crate::node::tcnet_packet::Data::{OptIn, OptOut};
 use crate::node::tcnet_packet::Data;
 use crate::ForeignNodeInfo;
 
 pub struct Dispatcher {
     pub(crate) node_config: ApplicationConfig,
-    pub(crate) bind_address: Ipv4Addr,
-    pub unicast_port: u16,
+    pub(crate) bind_address: SocketAddrV4,
     pub(crate) state: Arc<RwLock<DynamicNodeState>>,
     pub(crate) outgoing_tx: kanal::Sender<OutgoingRequest>,
     pub(crate) outgoing_rx: kanal::Receiver<OutgoingRequest>,
@@ -33,25 +32,25 @@ pub struct Dispatcher {
 
 pub async fn start_node(dispatcher: Arc<Dispatcher>) {
     trace!("binding sockets...");
-    let broadcast_socket_addr = SocketAddr::new(dispatcher.bind_address.into(), 60_000);
+    let broadcast_socket_addr = SocketAddrV4::new(*dispatcher.bind_address.ip(), 60_000);
     let broadcast_socket = Arc::new(UdpSocket::bind(broadcast_socket_addr).await
         .expect("Could not bind to socket 60000"));
     broadcast_socket.set_broadcast(true)
         .expect("Could not enable socket 60000 for broadcasting");
 
-    let time_broadcast_addr = SocketAddr::new(dispatcher.bind_address.into(), 60_001);
+    let time_broadcast_addr = SocketAddrV4::new(*dispatcher.bind_address.ip(), 60_001);
     let time_broadcast_socket = Arc::new(UdpSocket::bind(time_broadcast_addr).await
         .expect("Could not bind to socket 60001"));
     time_broadcast_socket.set_broadcast(true)
         .expect("Could not enable socket 60001 for broadcasting");
 
-    let broadcast_socket_addr2 = SocketAddr::new(dispatcher.bind_address.into(), 60_002);
+    let broadcast_socket_addr2 = SocketAddrV4::new(*dispatcher.bind_address.ip(), 60_002);
     let broadcast_socket2 = Arc::new(UdpSocket::bind(broadcast_socket_addr2).await
         .expect("Could not bind to broadcast socket 60002"));
     broadcast_socket2.set_broadcast(true)
         .expect("Could not enable socket 60002 for broadcasting");
 
-    let unicast_socket_addr = SocketAddr::new(dispatcher.bind_address.into(), dispatcher.unicast_port);
+    let unicast_socket_addr = dispatcher.bind_address;
     let unicast_socket = Arc::new(UdpSocket::bind(unicast_socket_addr).await
         .expect("Could not bind to unicast socket")
     );
@@ -98,25 +97,23 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
                         trace!("Received packet: {:?}", packet);
 
                         let src_addr = match src {
-                            SocketAddr::V4(addr) => *addr.ip(),
+                            SocketAddr::V4(addr) => addr,
                             _ => unreachable!(),
                         };
 
                         match &packet.data {
                             OptIn(opt_in_data) => {
-                                let node_config = opt_in_node_config(&packet.header, opt_in_data);
+                                let node_config = node_config_from_opt_in(*src_addr.ip(), &packet.header, opt_in_data);
                                 let mut state = dispatcher.state.write().await;
                                 {
                                     let outer = state.discovered_nodes.entry(src_addr)
                                         .or_insert(ForeignNode {
                                             last_seen: 0,
                                             address: src_addr,
-                                            applications: HashMap::new(),
+                                            config: node_config,
                                             dj_controller: None,
                                         });
                                     outer.last_seen = timestamp_secs();
-                                    let inner = outer.applications.entry(node_config.node_id).or_insert(node_config);
-                                    *inner = node_config;
                                 }
                                 publish_nodes_snapshot(&state, &dispatcher.nodes_buf_input);
                             }
@@ -137,39 +134,26 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
 
                         if is_dj_packet(&packet.data) {
                             let mut state = dispatcher.state.write().await;
-                            let created_new_ctrl = {
-                                let foreign_node = state.discovered_nodes
+                            let mut created_new_ctrl = false;
+                            state.discovered_nodes
                                     .entry(src_addr)
-                                    .or_insert(ForeignNode {
-                                        last_seen: timestamp_secs(),
-                                        address: src_addr,
-                                        applications: HashMap::new(),
-                                        dj_controller: None,
+                                    .and_modify(|foreign_node| {
+                                        if foreign_node.dj_controller.is_none() {
+                                            let (ctrl, task_fut) = DjController::new(
+                                                dispatcher.outgoing_tx.clone(),
+                                                src_addr,
+                                            );
+                                            foreign_node.dj_controller = Some(ctrl);
+                                            spawn(task_fut);
+                                            created_new_ctrl = true;
+                                        }
+                                        if let Some(ctrl) = &foreign_node.dj_controller {
+                                            let _ = ctrl.packet_tx.try_send(packet);
+                                        }
+                                        
+                                        foreign_node.last_seen = timestamp_secs();
                                     });
-                                foreign_node.last_seen = timestamp_secs();
-
-                                let mut new_ctrl = false;
-                                if foreign_node.dj_controller.is_none() {
-                                    let port = foreign_node.applications.values()
-                                        .next()
-                                        .map(|a| a.unicast_port)
-                                        .unwrap_or(65_023);
-                                    let (ctrl, task_fut) = DjController::new(
-                                        dispatcher.outgoing_tx.clone(),
-                                        src_addr,
-                                        port,
-                                    );
-                                    foreign_node.dj_controller = Some(ctrl);
-                                    spawn(task_fut);
-                                    new_ctrl = true;
-                                }
-
-                                if let Some(ctrl) = &foreign_node.dj_controller {
-                                    let _ = ctrl.packet_tx.try_send(packet);
-                                }
-                                new_ctrl
-                            };
-
+                            
                             if created_new_ctrl {
                                 publish_nodes_snapshot(&state, &dispatcher.nodes_buf_input);
                             }
@@ -195,10 +179,10 @@ async fn send(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) {
         }
 
         for msg in msgs {
-            let target = SocketAddrV4::new(msg.destination, msg.unicast_port);
+            let target = msg.destination;
             let (msg_type_id, _) = msg.data.message_type_id();
             // Serialize while holding the lock, release before sending.
-            let send_result = {
+            let serde_result = {
                 let mut state = dispatcher.state.write().await;
                 let seq = state.current_seq;
                 let header = management_header(&dispatcher.node_config, msg_type_id, seq);
@@ -208,7 +192,7 @@ async fn send(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) {
                 (state.current_seq, _) = state.current_seq.overflowing_add(1);
                 bytes
             };
-            match send_result {
+            match serde_result {
                 Ok(bytes) => {
                     socket.send_to(&bytes, target).await.expect("Could not send packet!");
                 }
@@ -223,9 +207,9 @@ async fn send(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) {
 async fn broadcast(dispatcher: Arc<Dispatcher>, broadcast_socket: Arc<UdpSocket>) {
     let ipv4_addrs = best_local_ipv4_addrs()
         .expect("Could not get local IPv4 addresses")
-        .iter().map(|net| SocketAddr::V4(SocketAddrV4::new(net.broadcast(), 60_000)))
+        .iter().map(|net| SocketAddrV4::new(net.broadcast(), 60_000))
         .collect::<HashSet<_>>();
-    trace!("Broadcasting opt in packets to {:?}", ipv4_addrs);
+    info!("Broadcasting opt in packets to {:?}", ipv4_addrs);
     let mut tick = interval(Duration::from_secs(1));
     loop {
         tick.tick().await;
@@ -233,18 +217,31 @@ async fn broadcast(dispatcher: Arc<Dispatcher>, broadcast_socket: Arc<UdpSocket>
 
         // Serialize while holding the lock, then release before sending so
         // listener tasks are not starved during the (potentially slow) send_to.
-        let payload = {
+        let packets = {
             let mut dispatcher_state = dispatcher.state.write().await;
             let config = dispatcher.node_config;
-            let seq = dispatcher_state.current_seq;
-            let p = opt_in_packet(&config, &dispatcher_state, seq)
-                .expect("TCNet: Could not serialize opt in packet");
-            (dispatcher_state.current_seq, _) = dispatcher_state.current_seq.overflowing_add(1);
-            p
+            let foreign_addresses = dispatcher_state.discovered_nodes.keys().cloned().collect::<Vec<_>>(); 
+            let mut packets = foreign_addresses.iter().map(|foreign_address| {
+                let seq = dispatcher_state.current_seq;
+                let packet = opt_in_packet(&config, &dispatcher_state, seq)
+                    .expect("TCNet: Could not serialize opt in packet");
+                (dispatcher_state.current_seq, _) = dispatcher_state.current_seq.overflowing_add(1);
+                (*foreign_address, packet)
+            }).collect::<Vec<_>>();
+
+            packets.append(&mut ipv4_addrs.iter().map(|broadcast_addr|{
+                let seq = dispatcher_state.current_seq;
+                let packet = opt_in_packet(&config, &dispatcher_state, seq)
+                    .expect("TCNet: Could not serialize opt in packet");
+                    (dispatcher_state.current_seq, _) = dispatcher_state.current_seq.overflowing_add(1);
+                (*broadcast_addr, packet)
+            }).collect::<Vec<_>>());
+            
+            packets
         };
 
-        for addr in &ipv4_addrs {
-            let _ = broadcast_socket.send_to(&payload, addr).await;
+        for (addr, packet) in &packets {
+            let _ = broadcast_socket.send_to(&packet, addr).await;
         }
 
         trace!("Sent opt in packet");

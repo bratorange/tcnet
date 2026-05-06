@@ -6,18 +6,18 @@
 //!   cargo test -- --test-threads=1 --nocapture
 //! (single-threaded because the client binds fixed ports 60000-60002 + 65023)
 
-use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::thread::sleep;
 use std::time::Duration;
 use deku::DekuContainerWrite;
-
+use log::trace;
 use crate::node::tcnet_packet::management_header;
 use crate::node::tcnet_packet_serde::{
     AutoMasterMode, LayerId, LayerState, LayerStatus, LayerTimecode,
     MetricsData, MixerChannel, MixerData, NodeOptions, NodeType, OptInData,
     StatusData, TimePacketData,
 };
-use crate::{ApplicationConfig, TCNetClient};
+use crate::{ApplicationConfig, DjControllerView, TCNetClient};
 use crate::into_ascii;
 
 // ---------------------------------------------------------------------------
@@ -50,7 +50,7 @@ fn fake_config() -> ApplicationConfig {
         application_bug_version: 0,
         node_name: into_ascii!("CDJ-3000"),
         node_options: NodeOptions::empty(),
-        unicast_port: 65_023,
+        address: SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 60_023),
     }
 }
 
@@ -63,7 +63,7 @@ fn opt_in_bytes(config: &ApplicationConfig, seq: u8) -> (Vec<u8>, Vec<u8>) {
     let header = management_header(config, 2, seq);
     let data = OptInData {
         node_count: 1,
-        node_listener_port: config.unicast_port,
+        node_listener_port: config.address.port(),
         uptime: 0,
         _reserved0: Default::default(),
         vendor_name: config.vendor_name,
@@ -89,7 +89,7 @@ fn status_bytes(config: &ApplicationConfig, seq: u8) -> (Vec<u8>, Vec<u8>) {
 
     let data = StatusData {
         node_count: 1,
-        node_listener_port: config.unicast_port,
+        node_listener_port: config.address.port(),
         _reserved0: [0u8; 6],
         layer_1_source: 1,
         layer_2_source: 2,
@@ -309,11 +309,10 @@ fn mixer_bytes(config: &ApplicationConfig, seq: u8) -> (Vec<u8>, Vec<u8>) {
 #[test]
 fn test_cdj_play_session() {
     let _ = env_logger::try_init();
-
-    let client_addr = Ipv4Addr::new(127, 0, 0, 1);
     let dest: SocketAddr = "127.0.0.1:60000".parse().unwrap();
 
-    let client = TCNetClient::new(client_addr, ApplicationConfig::default());
+    let config = ApplicationConfig::default();
+    let client = TCNetClient::new(config);
     // Give the tokio runtime time to bind all listening sockets before sending.
     sleep(Duration::from_millis(500));
 
@@ -345,8 +344,13 @@ fn test_cdj_play_session() {
     // Allow the dj_controller_task to drain packets and write to triple buffer
     sleep(Duration::from_millis(200));
 
+    client._runtime.block_on(async {
+        let state = client.dispatcher.state.write().await;
+        trace!("The following nodes were discovered {:?}", state.discovered_nodes);
+    });
+    // TODO fix this test
     let mut view = client
-        .get_controller_view(client_addr)
+        .get_controller_view(config.address)
         .expect("DjControllerView not available — no DJ packets received?");
 
     // Give dj_controller_task time to drain the forwarded packets and write state.

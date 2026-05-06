@@ -1,12 +1,12 @@
-use std::net::Ipv4Addr;
-use std::sync::{Arc, Mutex};
-use tokio::runtime::Runtime;
-use tokio::sync::RwLock;
-use crate::node::{DynamicNodeState, ForeignNode};
-use crate::node::dispatcher::{Dispatcher, start_node};
+use crate::node::dispatcher::{start_node, Dispatcher};
 use crate::node::dj_controller::OutgoingRequest;
 use crate::node::tcnet_packet::Data;
 use crate::node::tcnet_packet_serde::NodeId;
+use crate::node::{DynamicNodeState, ForeignNode};
+use std::net::SocketAddrV4;
+use std::sync::{Arc, Mutex};
+use tokio::runtime::Runtime;
+use tokio::sync::RwLock;
 
 pub mod node;
 pub mod active_node;
@@ -16,12 +16,12 @@ mod dj_controller_view;
 #[cfg(test)]
 mod tests;
 
+pub use active_node::ActiveDJNode;
 pub use dj_controller_view::DjControllerView;
 pub use node::dj_controller::{
     ChannelSnapshot, DjControllerState, LayerSnapshot, MixerSnapshot, TimeoutError,
 };
 pub use node::ApplicationConfig;
-pub use active_node::ActiveDJNode;
 
 const SPEC_MAJOR_VERSION: u8 = 3;
 const SPEC_MINOR_VERSION: u8 = 6;
@@ -29,9 +29,9 @@ const SPEC_MINOR_VERSION: u8 = 6;
 /// Snapshot of a discovered foreign node, readable via `TCNetClient::active_nodes()`.
 #[derive(Clone, Debug)]
 pub struct ForeignNodeInfo {
-    pub address: Ipv4Addr,
+    pub address: SocketAddrV4,
     pub last_seen: u64,
-    pub node_ids: Vec<NodeId>,
+    pub node_id: NodeId,
     pub has_dj_controller: bool,
 }
 
@@ -40,7 +40,7 @@ impl From<&ForeignNode> for ForeignNodeInfo {
         ForeignNodeInfo {
             address: n.address,
             last_seen: n.last_seen,
-            node_ids: n.applications.keys().copied().collect(),
+            node_id: n.config.node_id,
             has_dj_controller: n.dj_controller.is_some(),
         }
     }
@@ -56,7 +56,7 @@ pub struct TCNetClient {
 }
 
 impl TCNetClient {
-    pub fn new(bind_address: Ipv4Addr, node_config: ApplicationConfig) -> Self {
+    pub fn new(node_config: ApplicationConfig) -> Self {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .thread_name("tcnet")
@@ -72,8 +72,7 @@ impl TCNetClient {
 
         let dispatcher = Arc::new(Dispatcher {
             node_config,
-            unicast_port: node_config.unicast_port,
-            bind_address,
+            bind_address: node_config.address,
             state: Arc::new(RwLock::new(DynamicNodeState::default())),
             outgoing_tx,
             outgoing_rx,
@@ -102,7 +101,7 @@ impl TCNetClient {
 
     /// Returns a `DjControllerView` for the node at `addr` if DJ-type packets
     /// have been received from it.
-    pub fn get_controller_view(&self, addr: Ipv4Addr) -> Option<DjControllerView> {
+    pub fn get_controller_view(&self, addr: SocketAddrV4) -> Option<DjControllerView> {
         self._runtime.block_on(async {
             let mut state = self.dispatcher.state.write().await;
             let ctrl = state.discovered_nodes.get_mut(&addr)?

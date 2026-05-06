@@ -1,10 +1,10 @@
+use clap::Parser;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
-use clap::Parser;
-use tcnet::{ApplicationConfig, TCNetClient};
 use tcnet::simulator::app::SimulatorApp;
 use tcnet::simulator::audio::AudioEngine;
 use tcnet::simulator::virtual_usb::VirtualUsb;
+use tcnet::{ApplicationConfig, TCNetClient};
 
 #[derive(Parser)]
 #[command(name = "simulator", about = "DJ Deck simulator")]
@@ -23,7 +23,7 @@ fn main() {
     let args = Args::parse();
 
     let node_config = ApplicationConfig::default();
-    let client = TCNetClient::new(args.bind_ip, node_config);
+    let client = TCNetClient::new(node_config);
     let active_node = client.create_active_node();
 
     let usb = VirtualUsb::from_dir(args.usb_dir);

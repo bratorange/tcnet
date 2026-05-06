@@ -1,12 +1,12 @@
-use std::collections::HashMap;
-use std::net::Ipv4Addr;
-use std::time::{Duration, Instant};
-use tokio::sync::oneshot;
 use crate::node::tcnet_packet::{Data, Packet};
 use crate::node::tcnet_packet_serde::{
     ArtworkFileData, BigWaveformData, Bpm, LayerId, LayerState, MixerChannel,
     RequestData, RequestDataType, SmallWaveformData, SmpteMode, Speed,
 };
+use std::collections::HashMap;
+use std::net::SocketAddrV4;
+use std::time::{Duration, Instant};
+use tokio::sync::oneshot;
 
 // ---------------------------------------------------------------------------
 // Snapshot types
@@ -170,7 +170,7 @@ impl LayerSnapshot {
 // Triple buffer payload
 // ---------------------------------------------------------------------------
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DjControllerState {
     pub layers: Vec<LayerSnapshot>,
     pub mixer: MixerSnapshot,
@@ -212,8 +212,7 @@ pub(crate) enum UserRequest {
 }
 
 pub(crate) struct OutgoingRequest {
-    pub destination: Ipv4Addr,
-    pub unicast_port: u16,
+    pub destination: SocketAddrV4,
     pub data: Data,
 }
 
@@ -221,6 +220,7 @@ pub(crate) struct OutgoingRequest {
 // DjController — held by ForeignNode
 // ---------------------------------------------------------------------------
 
+#[derive(Debug)]
 pub(crate) struct DjController {
     pub packet_tx: kanal::Sender<Packet>,
     pub request_tx: kanal::Sender<UserRequest>,
@@ -231,9 +231,8 @@ pub(crate) struct DjController {
 impl DjController {
     pub fn new(
         outgoing_tx: kanal::Sender<OutgoingRequest>,
-        foreign_addr: Ipv4Addr,
-        unicast_port: u16,
-    ) -> (Self, impl std::future::Future<Output = ()>) {
+        foreign_addr: SocketAddrV4,
+    ) -> (Self, impl Future<Output = ()>) {
         let (packet_tx, packet_rx) = kanal::bounded::<Packet>(100);
         let (request_tx, request_rx) = kanal::bounded::<UserRequest>(16);
         let (buf_input, buf_output) =
@@ -245,7 +244,6 @@ impl DjController {
             outgoing_tx,
             buf_input,
             foreign_addr,
-            unicast_port,
         );
 
         let ctrl = DjController {
@@ -299,8 +297,7 @@ async fn dj_controller_task(
     request_rx: kanal::Receiver<UserRequest>,
     outgoing_tx: kanal::Sender<OutgoingRequest>,
     mut buf_input: triple_buffer::Input<DjControllerState>,
-    foreign_addr: Ipv4Addr,
-    unicast_port: u16,
+    foreign_addr: SocketAddrV4,
 ) {
     let mut layers: HashMap<LayerId, LayerSnapshot> = {
         let mut m = HashMap::new();
@@ -394,7 +391,6 @@ async fn dj_controller_task(
                 UserRequest::SmallWaveform { layer, reply } => {
                     let _ = outgoing_tx.send(OutgoingRequest {
                         destination: foreign_addr,
-                        unicast_port,
                         data: Data::Request(RequestData {
                             data_type: RequestDataType::SmallWaveformData,
                             layer,
@@ -409,7 +405,6 @@ async fn dj_controller_task(
                 UserRequest::BigWaveform { layer, reply } => {
                     let _ = outgoing_tx.send(OutgoingRequest {
                         destination: foreign_addr,
-                        unicast_port,
                         data: Data::Request(RequestData {
                             data_type: RequestDataType::LargeWaveformData,
                             layer,
@@ -424,7 +419,6 @@ async fn dj_controller_task(
                 UserRequest::ArtworkFile { layer, reply } => {
                     let _ = outgoing_tx.send(OutgoingRequest {
                         destination: foreign_addr,
-                        unicast_port,
                         data: Data::Request(RequestData {
                             data_type: RequestDataType::LowResArtworkFile,
                             layer,

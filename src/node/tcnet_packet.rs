@@ -1,13 +1,13 @@
+use crate::into_ascii;
+use crate::node::dispatcher::timestamp_micros;
+use crate::node::tcnet_packet::Data::*;
 use crate::node::tcnet_packet_serde::*;
+use crate::node::{ApplicationConfig, DynamicNodeState};
+use deku::prelude::Writer;
 use deku::{DekuContainerRead, DekuContainerWrite, DekuError, DekuWrite, DekuWriter};
 use std::fmt::Debug;
 use std::io::{Seek, Write};
-use deku::prelude::Writer;
-use log::trace;
-use crate::into_ascii;
-use crate::node::{ApplicationConfig, DynamicNodeState};
-use crate::node::dispatcher::timestamp_micros;
-use crate::node::tcnet_packet::Data::*;
+use std::net::{Ipv4Addr, SocketAddrV4};
 
 #[derive(Clone, DekuWrite)]
 pub struct Packet
@@ -145,14 +145,14 @@ impl Debug for Packet {
     }
 }
 
-pub(crate) fn opt_in_node_config(
+pub(crate) fn node_config_from_opt_in(
+    src_addr: Ipv4Addr,
     header: &ManagementHeader,
     data: &OptInData
 ) -> ApplicationConfig {
     ApplicationConfig {
         node_id: header.node_id,
         node_type: header.node_type,
-        unicast_port: data.node_listener_port,
         vendor_name: data.vendor_name,
         application_name: data.application,
         application_major_version: data.application_major_version,
@@ -160,6 +160,7 @@ pub(crate) fn opt_in_node_config(
         application_bug_version: data.application_bug_version,
         node_name: header.node_name,
         node_options: header.node_options,
+        address: SocketAddrV4::new(src_addr, data.node_listener_port),
     }
 }
 
@@ -182,7 +183,7 @@ pub(crate) fn opt_in_packet(app_config: &ApplicationConfig, node_state: &Dynamic
     let header = management_header(app_config, 2, seq);
     let data = OptInData{
         node_count: node_state.discovered_nodes.len() as u16,
-        node_listener_port: app_config.unicast_port,
+        node_listener_port: app_config.address.port(),
         uptime: node_state.uptime,
         _reserved0: Default::default(),
         vendor_name: app_config.vendor_name,

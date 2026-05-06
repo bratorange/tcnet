@@ -1,7 +1,7 @@
 use crate::into_ascii;
 use crate::node::tcnet_packet_serde::{AsciiString, NodeId, NodeOptions, NodeType};
 use std::collections::HashMap;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddrV4};
 pub(crate) mod dj_controller;
 pub(crate) mod tcnet_packet_serde;
 pub(crate) mod tcnet_packet;
@@ -9,16 +9,17 @@ pub mod dispatcher;
 
 use crate::node::dj_controller::DjController;
 
+#[derive(Debug)]
 pub(crate) struct ForeignNode {
     pub last_seen: u64,
-    pub address: Ipv4Addr,
-    pub applications: HashMap<NodeId, ApplicationConfig>,
+    pub address: SocketAddrV4,
+    pub config: ApplicationConfig,
     pub dj_controller: Option<DjController>,
 }
 
 #[derive(Default)]
 pub(crate) struct DynamicNodeState {
-    pub discovered_nodes: HashMap<Ipv4Addr, ForeignNode>,
+    pub discovered_nodes: HashMap<SocketAddrV4, ForeignNode>,
     pub uptime: u16,
     pub current_seq: u8,
 }
@@ -34,7 +35,7 @@ pub struct ApplicationConfig {
     pub application_bug_version: u8,
     pub node_name: AsciiString<8>,
     pub node_options: NodeOptions,
-    pub unicast_port: u16,
+    pub address: SocketAddrV4,
 }
 
 impl Default for ApplicationConfig {
@@ -49,7 +50,7 @@ impl Default for ApplicationConfig {
             application_bug_version: 102,
             node_name: into_ascii!("Default_"),
             node_options: NodeOptions::empty(),
-            unicast_port: 65_023,
+            address: SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0),
         }
     }
 }
