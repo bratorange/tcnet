@@ -448,13 +448,15 @@ pub struct BeatGridHeader {
     data_type: u8,                      // Datatype 8 = Beat Grid Data
     layer_id: u8,                       // Layer Number
     #[deku(endian = "little")]
-    data_size: u32,                     // Total Data Size
+    data_size: u32,                     // Total Data Size (bytes of all entries combined)
     #[deku(endian = "little")]
     total_packets: u32,                 // Total Packets used for data
     #[deku(endian = "little")]
     packet_no: u32,                     // Packet Number
     #[deku(endian = "little")]
-    data_cluster_size: u32,             // Data Cluster Size
+    data_cluster_size: u32,             // Bytes of entry data in this packet
+    #[deku(count = "data_cluster_size")]
+    pub payload: Vec<u8>,               // Serialised BeatGridEntry items (8 bytes each)
 }
 
 #[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
@@ -725,4 +727,61 @@ pub struct TimePacketData {
     pub lb_on_air: u8,                      // Layer B OnAir State
     pub lm_on_air: u8,                      // Layer M OnAir State
     pub lc_on_air: u8,                      // Layer C OnAir State
+}
+
+// ---------------------------------------------------------------------------
+// Constructors for building response packets
+// ---------------------------------------------------------------------------
+
+impl BeatGridEntry {
+    pub fn new(beat_number: u16, beat_type: u8, beat_timestamp: u32) -> Self {
+        Self { beat_number, beat_type, _reserved0: ReservedData::default(), beat_timestamp }
+    }
+}
+
+impl BeatGridHeader {
+    pub fn new_packet(layer_id: u8, total_data_size: u32, total_packets: u32, packet_no: u32, payload: Vec<u8>) -> Self {
+        let data_cluster_size = payload.len() as u32;
+        Self { data_type: 8, layer_id, data_size: total_data_size, total_packets, packet_no, data_cluster_size, payload }
+    }
+}
+
+impl SmallWaveformData {
+    pub fn new(layer_id: u8, waveform_data: [u8; 2400]) -> Self {
+        Self { data_type: 16, layer_id, data_size: 2400, total_packets: 1, packet_no: 0, _reserved0: ReservedData::default(), waveform_data }
+    }
+}
+
+impl BigWaveformData {
+    pub fn new_packet(layer_id: u8, total_size: u32, total_packets: u32, packet_no: u32, chunk: Vec<u8>) -> Self {
+        let cluster = chunk.len() as u32;
+        Self { data_type: 32, layer_id, data_size: total_size, total_packets, packet_no, data_cluster_size: cluster, waveform_data: chunk }
+    }
+}
+
+impl ArtworkFileData {
+    pub fn new_packet(layer_id: u8, total_size: u32, total_packets: u32, packet_no: u32, chunk: Vec<u8>) -> Self {
+        let cluster = chunk.len() as u32;
+        Self { data_type: 128, layer_id, data_size: total_size, total_packets, packet_no, data_cluster_size: cluster, file_data: chunk }
+    }
+}
+
+impl CueEntry {
+    pub fn new(cue_type: u8, cue_in_time: u32, cue_out_time: u32, color: [u8; 3]) -> Self {
+        Self { cue_type, _reserved0: ReservedData::default(), cue_in_time, cue_out_time, _reserved1: ReservedData::default(), cue_color: color, _reserved2: ReservedData::default() }
+    }
+    pub const EMPTY: Self = Self {
+        cue_type: 0, _reserved0: ReservedData([0; 1]), cue_in_time: 0, cue_out_time: 0,
+        _reserved1: ReservedData([0; 1]), cue_color: [0; 3], _reserved2: ReservedData([0; 8]),
+    };
+}
+
+impl CueData {
+    pub fn new(layer_id: u8, cue_in: u32) -> Self {
+        let mut cues = [CueEntry::EMPTY; 18];
+        if cue_in > 0 {
+            cues[0] = CueEntry::new(1, cue_in, cue_in, [255, 128, 0]);
+        }
+        Self { data_type: 12, layer_id, _reserved0: ReservedData::default(), loop_in: 0, loop_out: 0, cues }
+    }
 }

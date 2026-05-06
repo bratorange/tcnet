@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use tcnet::simulator::app::SimulatorApp;
 use tcnet::simulator::audio::AudioEngine;
 use tcnet::simulator::virtual_usb::VirtualUsb;
-use tcnet::{ApplicationConfig, TCNetClient};
+use tcnet::{ApplicationConfig, NodeType, TCNetClient};
 
 #[derive(Parser)]
 #[command(name = "simulator", about = "DJ Deck simulator")]
@@ -22,7 +22,9 @@ fn main() {
     env_logger::init();
     let args = Args::parse();
 
-    let node_config = ApplicationConfig::default();
+    let mut node_config = ApplicationConfig::default();
+    node_config.node_type = NodeType::Master;
+    node_config.address.set_ip(args.bind_ip);
     let client = TCNetClient::new(node_config);
     let active_node = client.create_active_node();
 

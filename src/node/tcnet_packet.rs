@@ -115,6 +115,11 @@ impl Packet {
                             .map_err(|x| SerdeError::InvalidData(x))?;
                         BigWaveform(inner)
                     }
+                    128 => {
+                        let (_, inner) = ArtworkFileData::from_bytes(remaining)
+                            .map_err(|x| SerdeError::InvalidData(x))?;
+                        ArtworkFile(inner)
+                    }
                     150 => {
                         let (_, inner) = MixerData::from_bytes(remaining)
                             .map_err(|x| SerdeError::InvalidData(x))?;
@@ -122,11 +127,6 @@ impl Packet {
                     }
                     _ => return Err(SerdeError::MessageTypeNotImplemented),
                 }
-            }
-            204 => {
-                let (_, inner) = ArtworkFileData::from_bytes(remaining)
-                    .map_err(|x| SerdeError::InvalidData(x))?;
-                ArtworkFile(inner)
             }
             254 => {
                 let (_, inner) = TimePacketData::from_bytes(remaining)
@@ -220,7 +220,7 @@ impl Data {
             BigWaveform(_) => (200, Some(32)),
             Mixer(_) => (200, Some(150)),
 
-            ArtworkFile(_) => (204, None),
+            ArtworkFile(_) => (200, Some(128)),
             // AppSpecific(_) => 254, None)
             Time(_) => (254, None),
         }

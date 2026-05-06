@@ -6,12 +6,14 @@ pub(crate) mod dj_controller;
 pub(crate) mod tcnet_packet_serde;
 pub(crate) mod tcnet_packet;
 pub mod dispatcher;
+pub(crate) mod response_data;
 
 use crate::node::dj_controller::DjController;
 
 #[derive(Debug)]
 pub(crate) struct ForeignNode {
     pub last_seen: u64,
+    /// Full socket address including the listener port (from OptIn).
     pub address: SocketAddrV4,
     pub config: ApplicationConfig,
     pub dj_controller: Option<DjController>,

@@ -15,7 +15,7 @@ use crate::node::tcnet_packet::management_header;
 use crate::node::tcnet_packet_serde::{
     AutoMasterMode, LayerId, LayerState, LayerStatus, LayerTimecode,
     MetricsData, MixerChannel, MixerData, NodeOptions, NodeType, OptInData,
-    StatusData, TimePacketData,
+    RequestData, RequestDataType, StatusData, TimePacketData,
 };
 use crate::{ApplicationConfig, DjControllerView, TCNetClient};
 use crate::into_ascii;
@@ -397,4 +397,129 @@ fn test_cdj_play_session() {
         assert_eq!(mixer.channels[1].fader_level, CH2_FADER, "ch2 fader");
         assert_eq!(mixer.mixer_id, 1, "mixer_id");
     }
+}
+
+// ---------------------------------------------------------------------------
+// REQUEST / response round-trip test
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_request_response() {
+    use crate::active_node::TrackMeta;
+    use crate::node::tcnet_packet::Packet;
+
+    let _ = env_logger::try_init();
+
+    // Start a Master-type TCNetClient on 127.0.0.1.
+    let mut node_config = ApplicationConfig::default();
+    node_config.node_type = NodeType::Master;
+    let client = TCNetClient::new(node_config);
+    sleep(Duration::from_millis(400));
+
+    // Load a track so all response_data slots are populated.
+    let mut node = client.create_active_node();
+    node.load_track(LayerId::L1, TrackMeta {
+        title: "Test Track".into(),
+        artist: "Test Artist".into(),
+        duration_ms: 60_000,
+        bpm: 120.0,
+        track_id: 1,
+    }).expect("load_track failed");
+    // Trigger mixer data so last_mixer is populated.
+    node.set_master_fader(200).ok();
+    sleep(Duration::from_millis(150));
+
+    // Bind the "viewer" socket and register it with the dispatcher via OptIn.
+    let viewer = UdpSocket::bind("127.0.0.1:0").expect("bind viewer");
+    viewer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    let viewer_port = viewer.local_addr().unwrap().port();
+
+    let dest: SocketAddr = "127.0.0.1:60000".parse().unwrap();
+    let viewer_cfg = ApplicationConfig {
+        node_type: NodeType::Slave,
+        address: SocketAddrV4::new(Ipv4Addr::LOCALHOST, viewer_port),
+        ..node_config
+    };
+    let (h, d) = opt_in_bytes(&viewer_cfg, 200);
+    send_packet(&viewer, dest, h, d);
+    sleep(Duration::from_millis(150));
+
+    // Receive packets, skipping OptIn/OptOut broadcasts, until expected count or timeout.
+    let recv_packets = |expected: usize| -> Vec<crate::node::tcnet_packet::Data> {
+        use crate::node::tcnet_packet::Data as D;
+        let mut collected = Vec::new();
+        let mut buf = [0u8; 8192];
+        loop {
+            match viewer.recv_from(&mut buf) {
+                Ok((size, _)) => {
+                    if let Ok(pkt) = Packet::deserialize_packet(&buf[..size]) {
+                        match pkt.data {
+                            D::OptIn(_) | D::OptOut(_) => {}
+                            data => {
+                                collected.push(data);
+                                if collected.len() >= expected { break; }
+                            }
+                        }
+                    }
+                }
+                Err(_) => break, // read timeout
+            }
+        }
+        collected
+    };
+
+    let send_req = |data_type: RequestDataType| {
+        let header = management_header(&viewer_cfg, 20, 201);
+        let req = RequestData { data_type, layer: LayerId::L1 };
+        let payload = [header.to_bytes().unwrap(), req.to_bytes().unwrap()].concat();
+        viewer.send_to(&payload, dest).expect("send request");
+    };
+
+    // MetricsData
+    send_req(RequestDataType::MetricsData);
+    let pkts = recv_packets(1);
+    assert!(matches!(pkts.first(), Some(crate::node::tcnet_packet::Data::Metrics(_))),
+        "MetricsData response: {:?}", pkts);
+
+    // MetaData
+    send_req(RequestDataType::MetaData);
+    let pkts = recv_packets(1);
+    assert!(matches!(pkts.first(), Some(crate::node::tcnet_packet::Data::Meta(_))),
+        "MetaData response: {:?}", pkts);
+
+    // BeatGridData
+    send_req(RequestDataType::BeatGridData);
+    let pkts = recv_packets(1);
+    assert!(matches!(pkts.first(), Some(crate::node::tcnet_packet::Data::BeatGrid(_))),
+        "BeatGridData response: {:?}", pkts);
+
+    // CueData
+    send_req(RequestDataType::CueData);
+    let pkts = recv_packets(1);
+    assert!(matches!(pkts.first(), Some(crate::node::tcnet_packet::Data::Cue(_))),
+        "CueData response: {:?}", pkts);
+
+    // SmallWaveformData
+    send_req(RequestDataType::SmallWaveformData);
+    let pkts = recv_packets(1);
+    assert!(matches!(pkts.first(), Some(crate::node::tcnet_packet::Data::SmallWaveform(_))),
+        "SmallWaveformData response: {:?}", pkts);
+
+    // LargeWaveformData
+    send_req(RequestDataType::LargeWaveformData);
+    let pkts = recv_packets(1);
+    assert!(matches!(pkts.first(), Some(crate::node::tcnet_packet::Data::BigWaveform(_))),
+        "LargeWaveformData response: {:?}", pkts);
+
+    // LowResArtworkFile (empty placeholder)
+    send_req(RequestDataType::LowResArtworkFile);
+    let pkts = recv_packets(1);
+    assert!(matches!(pkts.first(), Some(crate::node::tcnet_packet::Data::ArtworkFile(_))),
+        "LowResArtworkFile response: {:?}", pkts);
+
+    // MixerData
+    send_req(RequestDataType::MixerData);
+    let pkts = recv_packets(1);
+    assert!(matches!(pkts.first(), Some(crate::node::tcnet_packet::Data::Mixer(_))),
+        "MixerData response: {:?}", pkts);
 }

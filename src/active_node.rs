@@ -5,10 +5,12 @@ use tokio::time::interval;
 use crate::node::dj_controller::{ChannelSnapshot, LayerSnapshot, MixerSnapshot};
 use crate::node::tcnet_packet::Data;
 use crate::node::tcnet_packet_serde::{
+    ArtworkFileData, BeatGridEntry, BeatGridHeader, BigWaveformData, CueData, SmallWaveformData,
     AutoMasterMode, Bpm, LayerId, LayerState, LayerStatus, LayerTimecode,
     MetaData, MetricsData, MixerChannel, MixerData, ReservedData, SmpteMode,
     Speed, StatusData, TimePacketData,
 };
+use crate::node::response_data::SharedResponseData;
 
 pub use kanal::SendError;
 
@@ -309,20 +311,26 @@ impl ActiveNodeInner {
 pub struct ActiveDJNode {
     inner: Arc<Mutex<ActiveNodeInner>>,
     broadcast_tx: kanal::Sender<Data>,
-    #[allow(dead_code)] // kept alive to prevent channel close
+    slave_unicast_tx: kanal::Sender<Data>,
+    #[allow(dead_code)]
     time_tx: kanal::Sender<Data>,
+    pub(crate) response_data: SharedResponseData,
 }
 
 impl ActiveDJNode {
     pub(crate) fn new(
         broadcast_tx: kanal::Sender<Data>,
+        slave_unicast_tx: kanal::Sender<Data>,
         time_tx: kanal::Sender<Data>,
+        response_data: SharedResponseData,
         runtime: &Runtime,
     ) -> Self {
         let inner = Arc::new(Mutex::new(ActiveNodeInner::default()));
         let inner_bg = inner.clone();
         let bcast = broadcast_tx.clone();
+        let sucast = slave_unicast_tx.clone();
         let tcast = time_tx.clone();
+        let rd_bg = response_data.clone();
 
         runtime.spawn(async move {
             let mut time_tick = interval(Duration::from_millis(20));
@@ -343,7 +351,10 @@ impl ActiveDJNode {
                         for &id in LayerId::ALL.iter() {
                             if inner.layer(id).state.is_playing() {
                                 let data = inner.build_metrics_packet(id);
-                                let _ = bcast.try_send(data);
+                                if let Ok(mut rd) = rd_bg.lock() {
+                                    rd.layers[id.index()].last_metrics = Some(data.clone());
+                                }
+                                let _ = sucast.try_send(data);
                             }
                         }
                     }
@@ -351,25 +362,51 @@ impl ActiveDJNode {
             }
         });
 
-        Self { inner, broadcast_tx, time_tx }
+        Self { inner, broadcast_tx, slave_unicast_tx, time_tx, response_data }
     }
 
     fn send_broadcast(&self, data: Data) -> Result<(), SendError> {
         self.broadcast_tx.try_send(data).map(|_| ())
     }
 
+    fn send_slave_unicast(&self, data: Data) -> Result<(), SendError> {
+        self.slave_unicast_tx.try_send(data).map(|_| ())
+    }
+
+    fn update_metrics(&self, layer: LayerId) -> Result<(), SendError> {
+        let data = self.inner.lock().unwrap().build_metrics_packet(layer);
+        if let Ok(mut rd) = self.response_data.lock() {
+            rd.layers[layer.index()].last_metrics = Some(data.clone());
+        }
+        self.send_slave_unicast(data)
+    }
+
+    fn update_meta(&self, layer: LayerId) -> Result<(), SendError> {
+        let data = self.inner.lock().unwrap().build_meta_packet(layer);
+        if let Ok(mut rd) = self.response_data.lock() {
+            rd.layers[layer.index()].last_meta = Some(data.clone());
+        }
+        self.send_slave_unicast(data)
+    }
+
+    fn update_mixer(&self) -> Result<(), SendError> {
+        let data = self.inner.lock().unwrap().build_mixer_packet();
+        if let Ok(mut rd) = self.response_data.lock() {
+            rd.last_mixer = Some(data.clone());
+        }
+        self.send_slave_unicast(data)
+    }
+
     // --- playback ---
 
     pub fn play(&mut self, layer: LayerId) -> Result<(), SendError> {
         self.inner.lock().unwrap().layer_mut(layer).state = LayerState::Playing;
-        let data = self.inner.lock().unwrap().build_metrics_packet(layer);
-        self.send_broadcast(data)
+        self.update_metrics(layer)
     }
 
     pub fn pause(&mut self, layer: LayerId) -> Result<(), SendError> {
         self.inner.lock().unwrap().layer_mut(layer).state = LayerState::Paused;
-        let data = self.inner.lock().unwrap().build_metrics_packet(layer);
-        self.send_broadcast(data)
+        self.update_metrics(layer)
     }
 
     pub fn stop(&mut self, layer: LayerId) -> Result<(), SendError> {
@@ -380,8 +417,7 @@ impl ActiveDJNode {
             l.position_ms = 0;
             l.current_time_ms = 0;
         }
-        let data = self.inner.lock().unwrap().build_metrics_packet(layer);
-        self.send_broadcast(data)
+        self.update_metrics(layer)
     }
 
     pub fn cue(&mut self, layer: LayerId, pos_ms: u32) -> Result<(), SendError> {
@@ -392,8 +428,7 @@ impl ActiveDJNode {
             l.position_ms = pos_ms;
             l.current_time_ms = pos_ms;
         }
-        let data = self.inner.lock().unwrap().build_metrics_packet(layer);
-        self.send_broadcast(data)
+        self.update_metrics(layer)
     }
 
     // --- track loading ---
@@ -413,10 +448,73 @@ impl ActiveDJNode {
             l.title = info.title.clone();
             l.name = info.title.clone();
         }
+
+        // Pre-build response packets so the dispatcher can answer REQUEST packets.
+        if let Ok(mut rd) = self.response_data.lock() {
+            let ld = &mut rd.layers[layer.index()];
+            let lid = layer.as_packet_id();
+
+            // SmallWaveform: 2400 bytes, uniform amplitude 0x40 (blue).
+            let mut waveform_bytes = [0u8; 2400];
+            for chunk in waveform_bytes.chunks_mut(2) {
+                chunk[0] = 0x40; // amplitude
+                chunk[1] = 0x03; // blue color
+            }
+            ld.small_waveform_packet = Some(Data::SmallWaveform(SmallWaveformData::new(lid, waveform_bytes)));
+
+            // BigWaveform: same bytes, split into 4400-byte clusters.
+            let big_raw = waveform_bytes.to_vec();
+            let total = big_raw.len() as u32;
+            ld.big_waveform_packets = big_raw.chunks(4400)
+                .enumerate()
+                .map(|(i, chunk)| {
+                    let n = (total as usize).div_ceil(4400).max(1) as u32;
+                    Data::BigWaveform(BigWaveformData::new_packet(lid, total, n, i as u32, chunk.to_vec()))
+                })
+                .collect();
+
+            // BeatGrid: compute entries from BPM and duration.
+            {
+                use deku::DekuContainerWrite;
+                let beat_interval_ms = 60_000.0 / info.bpm;
+                let mut entries: Vec<BeatGridEntry> = Vec::new();
+                let mut beat = 0u32;
+                loop {
+                    let ts = (beat as f32 * beat_interval_ms) as u32;
+                    if ts > info.duration_ms { break; }
+                    let beat_type = if beat % 4 == 0 { 20u8 } else { 10u8 };
+                    entries.push(BeatGridEntry::new(beat as u16 + 1, beat_type, ts));
+                    beat += 1;
+                }
+                let raw: Vec<u8> = entries.iter()
+                    .flat_map(|e| e.to_bytes().unwrap_or_default())
+                    .collect();
+                let total_bg = raw.len() as u32;
+                let n = raw.chunks(2400).count().max(1) as u32;
+                ld.beat_grid_packets = if raw.is_empty() {
+                    vec![Data::BeatGrid(BeatGridHeader::new_packet(lid, 0, 1, 0, vec![]))]
+                } else {
+                    raw.chunks(2400)
+                        .enumerate()
+                        .map(|(i, chunk)| Data::BeatGrid(BeatGridHeader::new_packet(
+                            lid, total_bg, n, i as u32, chunk.to_vec())))
+                        .collect()
+                };
+            }
+
+            // Cue: default at start.
+            ld.cue_packet = Some(Data::Cue(CueData::new(lid, 0)));
+
+            // Artwork: empty placeholder.
+            ld.artwork_packets = vec![Data::ArtworkFile(ArtworkFileData::new_packet(lid, 0, 1, 0, vec![]))];
+        }
+
+        // Populate last_metrics so stopped tracks can respond to MetricsData requests.
+        let _ = self.update_metrics(layer);
+
         let status = self.inner.lock().unwrap().build_status_packet();
-        let meta = self.inner.lock().unwrap().build_meta_packet(layer);
         self.send_broadcast(status)?;
-        self.send_broadcast(meta)
+        self.update_meta(layer)
     }
 
     pub fn unload_track(&mut self, layer: LayerId) -> Result<(), SendError> {
@@ -437,52 +535,44 @@ impl ActiveDJNode {
             l.position_ms = ms;
             l.current_time_ms = ms;
         }
-        let data = self.inner.lock().unwrap().build_metrics_packet(layer);
-        self.send_broadcast(data)
+        self.update_metrics(layer)
     }
 
     pub fn set_bpm(&mut self, layer: LayerId, bpm: f32) -> Result<(), SendError> {
         self.inner.lock().unwrap().layer_mut(layer).bpm = Bpm((bpm * 100.0) as u32);
-        let data = self.inner.lock().unwrap().build_metrics_packet(layer);
-        self.send_broadcast(data)
+        self.update_metrics(layer)
     }
 
     pub fn set_speed(&mut self, layer: LayerId, speed: Speed) -> Result<(), SendError> {
         self.inner.lock().unwrap().layer_mut(layer).speed = speed;
-        let data = self.inner.lock().unwrap().build_metrics_packet(layer);
-        self.send_broadcast(data)
+        self.update_metrics(layer)
     }
 
     pub fn set_sync_master(&mut self, layer: LayerId, master: bool) -> Result<(), SendError> {
         self.inner.lock().unwrap().layer_mut(layer).sync_master = master;
-        let data = self.inner.lock().unwrap().build_metrics_packet(layer);
-        self.send_broadcast(data)
+        self.update_metrics(layer)
     }
 
     // --- mixer ---
 
     pub fn set_master_fader(&mut self, level: u8) -> Result<(), SendError> {
         self.inner.lock().unwrap().mixer.master_fader_level = level;
-        let data = self.inner.lock().unwrap().build_mixer_packet();
-        self.send_broadcast(data)
+        self.update_mixer()
     }
 
     pub fn set_crossfader(&mut self, pos: u8) -> Result<(), SendError> {
         self.inner.lock().unwrap().mixer.crossfader = pos;
-        let data = self.inner.lock().unwrap().build_mixer_packet();
-        self.send_broadcast(data)
+        self.update_mixer()
     }
 
     pub fn set_channel_fader(&mut self, ch: usize, level: u8) -> Result<(), SendError> {
         if ch < 6 { self.inner.lock().unwrap().mixer.channels[ch].fader_level = level; }
-        let data = self.inner.lock().unwrap().build_mixer_packet();
-        self.send_broadcast(data)
+        self.update_mixer()
     }
 
     pub fn set_channel_trim(&mut self, ch: usize, level: u8) -> Result<(), SendError> {
         if ch < 6 { self.inner.lock().unwrap().mixer.channels[ch].trim_level = level; }
-        let data = self.inner.lock().unwrap().build_mixer_packet();
-        self.send_broadcast(data)
+        self.update_mixer()
     }
 
     pub fn set_channel_eq(&mut self, ch: usize, hi: u8, mid: u8, low: u8) -> Result<(), SendError> {
@@ -492,14 +582,12 @@ impl ActiveDJNode {
             inner.mixer.channels[ch].eq_hi_mid = mid;
             inner.mixer.channels[ch].eq_low = low;
         }
-        let data = self.inner.lock().unwrap().build_mixer_packet();
-        self.send_broadcast(data)
+        self.update_mixer()
     }
 
     pub fn set_channel_filter(&mut self, ch: usize, val: u8) -> Result<(), SendError> {
         if ch < 6 { self.inner.lock().unwrap().mixer.channels[ch].filter_color = val; }
-        let data = self.inner.lock().unwrap().build_mixer_packet();
-        self.send_broadcast(data)
+        self.update_mixer()
     }
 
     pub fn set_channel_cue(&mut self, ch: usize, cue_a: bool, cue_b: bool) -> Result<(), SendError> {
@@ -508,8 +596,7 @@ impl ActiveDJNode {
             inner.mixer.channels[ch].cue_a = cue_a;
             inner.mixer.channels[ch].cue_b = cue_b;
         }
-        let data = self.inner.lock().unwrap().build_mixer_packet();
-        self.send_broadcast(data)
+        self.update_mixer()
     }
 
     pub fn set_on_air(&mut self, layer: LayerId, on_air: u8) {

@@ -1,5 +1,6 @@
 use crate::node::dispatcher::{start_node, Dispatcher};
 use crate::node::dj_controller::OutgoingRequest;
+use crate::node::response_data::{ResponseDataStore, SharedResponseData};
 use crate::node::tcnet_packet::Data;
 use crate::node::tcnet_packet_serde::NodeId;
 use crate::node::{DynamicNodeState, ForeignNode};
@@ -21,6 +22,7 @@ pub use dj_controller_view::DjControllerView;
 pub use node::dj_controller::{
     ChannelSnapshot, DjControllerState, LayerSnapshot, MixerSnapshot, TimeoutError,
 };
+pub use node::tcnet_packet_serde::NodeType;
 pub use node::ApplicationConfig;
 
 const SPEC_MAJOR_VERSION: u8 = 3;
@@ -52,7 +54,9 @@ pub struct TCNetClient {
     nodes_output: triple_buffer::Output<Vec<ForeignNodeInfo>>,
     cached_nodes: Vec<ForeignNodeInfo>,
     active_broadcast_tx: kanal::Sender<Data>,
+    active_slave_unicast_tx: kanal::Sender<Data>,
     active_time_tx: kanal::Sender<Data>,
+    response_data: SharedResponseData,
 }
 
 impl TCNetClient {
@@ -68,7 +72,9 @@ impl TCNetClient {
         let (nodes_input, nodes_output) =
             triple_buffer::triple_buffer(&Vec::<ForeignNodeInfo>::new());
         let (active_broadcast_tx, active_broadcast_rx) = kanal::bounded::<Data>(512);
+        let (active_slave_unicast_tx, active_slave_unicast_rx) = kanal::bounded::<Data>(512);
         let (active_time_tx, active_time_rx) = kanal::bounded::<Data>(512);
+        let response_data: SharedResponseData = Arc::new(Mutex::new(ResponseDataStore::default()));
 
         let dispatcher = Arc::new(Dispatcher {
             node_config,
@@ -78,7 +84,9 @@ impl TCNetClient {
             outgoing_rx,
             nodes_buf_input: Arc::new(Mutex::new(nodes_input)),
             active_broadcast_rx,
+            active_slave_unicast_rx,
             active_time_rx,
+            response_data: response_data.clone(),
         });
 
         runtime.spawn(start_node(dispatcher.clone()));
@@ -89,7 +97,9 @@ impl TCNetClient {
             nodes_output,
             cached_nodes: Vec::new(),
             active_broadcast_tx,
+            active_slave_unicast_tx,
             active_time_tx,
+            response_data,
         }
     }
 
@@ -115,7 +125,9 @@ impl TCNetClient {
     pub fn create_active_node(&self) -> ActiveDJNode {
         ActiveDJNode::new(
             self.active_broadcast_tx.clone(),
+            self.active_slave_unicast_tx.clone(),
             self.active_time_tx.clone(),
+            self.response_data.clone(),
             &self._runtime,
         )
     }
