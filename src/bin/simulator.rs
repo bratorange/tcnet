@@ -32,7 +32,7 @@ fn main() {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("CDJ-3000 × 2 + DJM-A9 Simulator")
+            .with_title("DJ Deck Simulator")
             .with_inner_size([1130.0, 660.0])
             .with_min_inner_size([1100.0, 640.0]),
         ..Default::default()
