@@ -101,3 +101,9 @@ into the viewer as described
 **Global / Layout**
 - Four stacked full-width waveform rows below
 - Synchronized vertical playhead across all waveform lanes
+
+
+I want it to be possible to have two tcnetrs based nodes on one computer. dont use shared port binds, but instead if a port cannot be bound, just try     
+with another for all 4 ports respectively. and update the node config if its the unicastport. other nodes will still be able to receive messages if non standard ports are used, if they themself listen on the default      
+broadcasting ports 60000, 60001 and 60002. only communication between two nodes which dont use standard broadcasing ports for listening. All nodes independent if they bound canonical ports or not shall however still      
+target their packages to the canonical broadcasting ports and the announced unicast port. this behavior is also partly described in the spec pdf 

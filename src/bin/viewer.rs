@@ -6,7 +6,7 @@ use tcnet::{ApplicationConfig, NodeType, TCNetClient};
 #[derive(Parser)]
 #[command(name = "viewer", about = "TCNet DJ controller passive viewer")]
 struct Args {
-    #[arg(long, default_value = "127.0.0.1")]
+    #[arg(long, default_value = "0.0.0.0")]
     bind_ip: Ipv4Addr,
 }
 

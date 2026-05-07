@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use deku::DekuContainerWrite;
 use tokio::net::UdpSocket;
@@ -25,6 +26,8 @@ use crate::ForeignNodeInfo;
 pub struct Dispatcher {
     pub(crate) node_config: ApplicationConfig,
     pub(crate) bind_address: SocketAddrV4,
+    /// Actual unicast port bound at runtime; may differ from bind_address.port() when falling back.
+    pub(crate) actual_unicast_port: AtomicU16,
     pub(crate) state: Arc<RwLock<DynamicNodeState>>,
     pub(crate) outgoing_tx: kanal::Sender<OutgoingRequest>,
     pub(crate) outgoing_rx: kanal::Receiver<OutgoingRequest>,
@@ -39,30 +42,43 @@ pub struct Dispatcher {
     pub(crate) response_data: SharedResponseData,
 }
 
+/// Try to bind a UDP socket at `preferred_port`, incrementing until a free port is found.
+/// Enables broadcast if `enable_broadcast` is set.
+async fn bind_with_fallback(ip: Ipv4Addr, preferred_port: u16, enable_broadcast: bool) -> (UdpSocket, u16) {
+    let mut port = preferred_port;
+    loop {
+        match UdpSocket::bind(SocketAddrV4::new(ip, port)).await {
+            Ok(socket) => {
+                if enable_broadcast {
+                    socket.set_broadcast(true).expect("set_broadcast failed");
+                }
+                if port != preferred_port {
+                    info!("Port {} busy; using {} instead", preferred_port, port);
+                }
+                return (socket, port);
+            }
+            Err(_) if port < 65_534 => port += 1,
+            Err(e) => panic!("Could not bind any port starting from {}: {}", preferred_port, e),
+        }
+    }
+}
+
 pub async fn start_node(dispatcher: Arc<Dispatcher>) {
     trace!("binding sockets...");
-    let broadcast_socket_addr = SocketAddrV4::new(*dispatcher.bind_address.ip(), 60_000);
-    let broadcast_socket = Arc::new(UdpSocket::bind(broadcast_socket_addr).await
-        .expect("Could not bind to socket 60000"));
-    broadcast_socket.set_broadcast(true)
-        .expect("Could not enable socket 60000 for broadcasting");
+    let ip = *dispatcher.bind_address.ip();
 
-    let time_broadcast_addr = SocketAddrV4::new(*dispatcher.bind_address.ip(), 60_001);
-    let time_broadcast_socket = Arc::new(UdpSocket::bind(time_broadcast_addr).await
-        .expect("Could not bind to socket 60001"));
-    time_broadcast_socket.set_broadcast(true)
-        .expect("Could not enable socket 60001 for broadcasting");
+    let (s, _) = bind_with_fallback(ip, 60_000, true).await;
+    let broadcast_socket = Arc::new(s);
 
-    let broadcast_socket_addr2 = SocketAddrV4::new(*dispatcher.bind_address.ip(), 60_002);
-    let broadcast_socket2 = Arc::new(UdpSocket::bind(broadcast_socket_addr2).await
-        .expect("Could not bind to broadcast socket 60002"));
-    broadcast_socket2.set_broadcast(true)
-        .expect("Could not enable socket 60002 for broadcasting");
+    let (s, _) = bind_with_fallback(ip, 60_001, true).await;
+    let time_broadcast_socket = Arc::new(s);
 
-    let unicast_socket_addr = dispatcher.bind_address;
-    let unicast_socket = Arc::new(UdpSocket::bind(unicast_socket_addr).await
-        .expect("Could not bind to unicast socket")
-    );
+    let (s, _) = bind_with_fallback(ip, 60_002, true).await;
+    let broadcast_socket2 = Arc::new(s);
+
+    let (s, unicast_port) = bind_with_fallback(ip, dispatcher.bind_address.port(), false).await;
+    dispatcher.actual_unicast_port.store(unicast_port, Ordering::Relaxed);
+    let unicast_socket = Arc::new(s);
 
     trace!("Starting network processing");
 
@@ -291,11 +307,11 @@ async fn broadcast(dispatcher: Arc<Dispatcher>, broadcast_socket: Arc<UdpSocket>
     let mut tick = interval(Duration::from_secs(1));
     loop {
         tick.tick().await;
-        trace!("Sending opt in packets...");
 
         let packets = {
             let mut dispatcher_state = dispatcher.state.write().await;
-            let config = dispatcher.node_config;
+            let mut config = dispatcher.node_config;
+            config.address.set_port(dispatcher.actual_unicast_port.load(Ordering::Relaxed));
 
             // Unicast to each known node's listener port.
             let unicast_targets: Vec<SocketAddrV4> = dispatcher_state.discovered_nodes.values()
@@ -320,6 +336,7 @@ async fn broadcast(dispatcher: Arc<Dispatcher>, broadcast_socket: Arc<UdpSocket>
 
             packets
         };
+        trace!("Sending opt in packets {:?}", packets);
 
         for (addr, packet) in &packets {
             let _ = broadcast_socket.send_to(packet, addr).await;

@@ -6,6 +6,7 @@ use crate::node::tcnet_packet_serde::NodeId;
 use crate::node::{DynamicNodeState, ForeignNode};
 use std::net::SocketAddrV4;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::AtomicU16;
 use tokio::runtime::Runtime;
 use tokio::sync::RwLock;
 
@@ -81,6 +82,7 @@ impl TCNetClient {
         let dispatcher = Arc::new(Dispatcher {
             node_config,
             bind_address: node_config.address,
+            actual_unicast_port: AtomicU16::new(node_config.address.port()),
             state: Arc::new(RwLock::new(DynamicNodeState::default())),
             outgoing_tx,
             outgoing_rx,

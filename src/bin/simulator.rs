@@ -10,7 +10,7 @@ use tcnet::{ApplicationConfig, NodeType, TCNetClient};
 #[command(name = "simulator", about = "DJ Deck simulator")]
 struct Args {
     /// IP address to bind the TCNet node to
-    #[arg(long, default_value = "127.0.0.1")]
+    #[arg(long, default_value = "0.0.0.0")]
     bind_ip: Ipv4Addr,
 
     /// Folder to use as the virtual USB stick (scanned for audio files)
