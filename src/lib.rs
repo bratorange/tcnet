@@ -13,16 +13,18 @@ pub mod node;
 pub mod active_node;
 #[cfg(feature = "simulator")]
 pub mod simulator;
+#[cfg(feature = "viewer")]
+pub mod viewer;
 mod dj_controller_view;
 #[cfg(test)]
 mod tests;
 
 pub use active_node::ActiveDJNode;
-pub use dj_controller_view::DjControllerView;
+pub use dj_controller_view::{DjControllerView, WaveformRequester};
 pub use node::dj_controller::{
     ChannelSnapshot, DjControllerState, LayerSnapshot, MixerSnapshot, TimeoutError,
 };
-pub use node::tcnet_packet_serde::NodeType;
+pub use node::tcnet_packet_serde::{BigWaveformData, LayerId, NodeType, SmallWaveformData};
 pub use node::ApplicationConfig;
 
 const SPEC_MAJOR_VERSION: u8 = 3;

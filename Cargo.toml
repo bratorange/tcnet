@@ -17,8 +17,14 @@ name = "simulator"
 path = "src/bin/simulator.rs"
 required-features = ["simulator"]
 
+[[bin]]
+name = "viewer"
+path = "src/bin/viewer.rs"
+required-features = ["viewer"]
+
 [features]
 simulator = ["dep:eframe", "dep:egui", "dep:rodio", "dep:lofty"]
+viewer = ["dep:eframe", "dep:egui"]
 
 [dependencies]
 bitflags = "2.11.0"

@@ -750,12 +750,20 @@ impl SmallWaveformData {
     pub fn new(layer_id: u8, waveform_data: [u8; 2400]) -> Self {
         Self { data_type: 16, layer_id, data_size: 2400, total_packets: 1, packet_no: 0, _reserved0: ReservedData::default(), waveform_data }
     }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.waveform_data
+    }
 }
 
 impl BigWaveformData {
     pub fn new_packet(layer_id: u8, total_size: u32, total_packets: u32, packet_no: u32, chunk: Vec<u8>) -> Self {
         let cluster = chunk.len() as u32;
         Self { data_type: 32, layer_id, data_size: total_size, total_packets, packet_no, data_cluster_size: cluster, waveform_data: chunk }
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.waveform_data
     }
 }
 
