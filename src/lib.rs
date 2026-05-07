@@ -121,6 +121,21 @@ impl TCNetClient {
         })
     }
 
+    /// Returns a `DjControllerView` for the first discovered DJ controller node.
+    pub fn get_any_controller_view(&self) -> Option<DjControllerView> {
+        self._runtime.block_on(async {
+            let mut state = self.dispatcher.state.write().await;
+            for node in state.discovered_nodes.values_mut() {
+                if let Some(ctrl) = node.dj_controller.as_mut() {
+                    if let Some(buf) = ctrl.buf_output.take() {
+                        return Some(DjControllerView::new(buf, ctrl.request_tx.clone()));
+                    }
+                }
+            }
+            None
+        })
+    }
+
     /// Creates an `ActiveDJNode` that broadcasts this node's state over TCNet.
     pub fn create_active_node(&self) -> ActiveDJNode {
         ActiveDJNode::new(

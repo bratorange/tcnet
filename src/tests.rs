@@ -348,9 +348,8 @@ fn test_cdj_play_session() {
         let state = client.dispatcher.state.write().await;
         trace!("The following nodes were discovered {:?}", state.discovered_nodes);
     });
-    // TODO fix this test
     let mut view = client
-        .get_controller_view(config.address)
+        .get_any_controller_view()
         .expect("DjControllerView not available — no DJ packets received?");
 
     // Give dj_controller_task time to drain the forwarded packets and write state.
