@@ -14,6 +14,7 @@ pub fn show(ui: &mut Ui, mixer: &mut MixerSnapshot, node: &mut ActiveDJNode) {
     let total_height = 620.0;
 
     let (rect, _) = ui.allocate_exact_size(vec2(total_width, total_height), Sense::hover());
+    let child_ui = &mut ui.new_child(egui::UiBuilder::new().max_rect(rect));
     let painter = ui.painter_at(rect);
 
     painter.rect_filled(rect, 8.0, MX_BG);
@@ -36,7 +37,7 @@ pub fn show(ui: &mut Ui, mixer: &mut MixerSnapshot, node: &mut ActiveDJNode) {
             inner.min + vec2(ch as f32 * (ch_w + 4.0), 0.0),
             vec2(ch_w, 460.0),
         );
-        draw_channel(ui, &painter, ch_rect, ch, mixer, node);
+        draw_channel(child_ui, &painter, ch_rect, ch, mixer, node);
     }
 
     // --- Crossfader ---
@@ -50,7 +51,7 @@ pub fn show(ui: &mut Ui, mixer: &mut MixerSnapshot, node: &mut ActiveDJNode) {
     );
     let xfader_rect = Rect::from_min_size(xfader_top + vec2(0.0, 12.0), vec2(inner.width(), 22.0));
     let mut xfader = mixer.crossfader as f32 / 255.0;
-    if horizontal_slider(ui, &painter, xfader_rect, &mut xfader, MX_ACCENT).dragged() {
+    if horizontal_slider(child_ui, &painter, xfader_rect, &mut xfader, MX_ACCENT).dragged() {
         mixer.crossfader = (xfader * 255.0) as u8;
         let _ = node.set_crossfader(mixer.crossfader);
     }
@@ -60,7 +61,7 @@ pub fn show(ui: &mut Ui, mixer: &mut MixerSnapshot, node: &mut ActiveDJNode) {
     painter.text(master_top, egui::Align2::LEFT_TOP, "MASTER", egui::FontId::proportional(9.0), MX_DIM);
     let master_rect = Rect::from_min_size(master_top + vec2(0.0, 12.0), vec2(inner.width() / 2.0 - 4.0, 22.0));
     let mut master = mixer.master_fader_level as f32 / 255.0;
-    if horizontal_slider(ui, &painter, master_rect, &mut master, MX_ACCENT).dragged() {
+    if horizontal_slider(child_ui, &painter, master_rect, &mut master, MX_ACCENT).dragged() {
         mixer.master_fader_level = (master * 255.0) as u8;
         let _ = node.set_master_fader(mixer.master_fader_level);
     }
@@ -75,7 +76,7 @@ pub fn show(ui: &mut Ui, mixer: &mut MixerSnapshot, node: &mut ActiveDJNode) {
         MX_DIM,
     );
     let mut booth = mixer.booth_level as f32 / 255.0;
-    if horizontal_slider(ui, &painter, booth_rect, &mut booth, MX_ACCENT).dragged() {
+    if horizontal_slider(child_ui, &painter, booth_rect, &mut booth, MX_ACCENT).dragged() {
         mixer.booth_level = (booth * 255.0) as u8;
     }
 
@@ -86,7 +87,7 @@ pub fn show(ui: &mut Ui, mixer: &mut MixerSnapshot, node: &mut ActiveDJNode) {
     let bfx_color = if mixer.beat_fx_on { MX_CUE_ON } else { MX_BTN };
     painter.rect_filled(bfx_btn, 3.0, bfx_color);
     painter.text(bfx_btn.center(), egui::Align2::CENTER_CENTER, "ON", egui::FontId::proportional(9.0), MX_TEXT);
-    if ui.allocate_rect(bfx_btn, Sense::click()).clicked() {
+    if child_ui.allocate_rect(bfx_btn, Sense::click()).clicked() {
         mixer.beat_fx_on = !mixer.beat_fx_on;
     }
 }

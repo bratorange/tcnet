@@ -26,6 +26,7 @@ pub fn show(
     let total_height = 620.0;
 
     let (rect, _) = ui.allocate_exact_size(vec2(total_width, total_height), Sense::hover());
+    let child_ui = &mut ui.new_child(egui::UiBuilder::new().max_rect(rect));
     let painter = ui.painter_at(rect);
 
     // Background
@@ -94,7 +95,7 @@ pub fn show(
     draw_waveform(&painter, wave_rect, deck, pos_ms, dur_ms);
 
     // --- Jog wheel ---
-    let jog_center = inner.min + vec2(inner.width() / 2.0, 205.0);
+    let jog_center = inner.min + vec2(inner.width() / 2.0, 230.0);
     let jog_radius = 75.0;
     painter.circle_filled(jog_center, jog_radius, Color32::from_rgb(45, 45, 45));
     painter.circle_stroke(jog_center, jog_radius, Stroke::new(3.0, CDJ_DIM));
@@ -149,7 +150,7 @@ pub fn show(
         );
 
         // Interaction
-        let resp = ui.allocate_rect(btn_rect, Sense::click());
+        let resp = child_ui.allocate_rect(btn_rect, Sense::click());
         if resp.clicked() {
             match *label_btn {
                 "PLAY" => deck.toggle_play_pause(node),
@@ -175,7 +176,7 @@ pub fn show(
     );
     let mut bpm = deck.bpm;
     let original_bpm = bpm;
-    let resp = slider_horizontal(ui, &painter, slider_rect, &mut bpm, 60.0, 200.0, CDJ_ACCENT);
+    let resp = slider_horizontal(child_ui, &painter, slider_rect, &mut bpm, 60.0, 200.0, CDJ_ACCENT);
     if resp.dragged() && (bpm - original_bpm).abs() > 0.05 {
         deck.set_tempo(bpm, node);
     }
@@ -204,8 +205,8 @@ pub fn show(
     painter.rect_filled(browse_rect, 5.0, CDJ_ACCENT);
     painter.text(browse_rect.center(), egui::Align2::CENTER_CENTER, "BROWSE", egui::FontId::proportional(12.0), CDJ_TEXT);
 
-    if ui.allocate_rect(browse_rect, Sense::click()).clicked()
-        || ui.allocate_rect(load_rect, Sense::click()).clicked()
+    if child_ui.allocate_rect(browse_rect, Sense::click()).clicked()
+        || child_ui.allocate_rect(load_rect, Sense::click()).clicked()
     {
         result.open_browser = true;
     }
