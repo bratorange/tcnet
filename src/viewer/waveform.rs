@@ -93,6 +93,7 @@ impl WaveformCache {
                 WaveformResult::Failed(idx) => {
                     self.pending_small[idx] = false;
                     self.pending_big[idx] = false;
+                    self.last_track_id[idx] = 0; // allow retry on next frame
                 }
             }
         }

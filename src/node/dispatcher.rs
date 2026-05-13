@@ -88,7 +88,9 @@ pub async fn start_node(dispatcher: Arc<Dispatcher>) {
     spawn(listen(dispatcher.clone(), broadcast_socket2.clone()));
     spawn(listen(dispatcher.clone(), time_broadcast_socket.clone()));
     spawn(listen(dispatcher.clone(), unicast_socket.clone()));
-    spawn(send(dispatcher.clone(), unicast_socket.clone()));
+    // Use broadcast_socket (port 60000) for outgoing responses so the source port
+    // matches the OptIn source, keeping all packets under one discovery key.
+    spawn(send(dispatcher.clone(), broadcast_socket.clone()));
     spawn(timeout_foreign_nodes(dispatcher.clone()));
     spawn(active_broadcast(dispatcher.clone(), broadcast_socket.clone(), time_broadcast_socket.clone()));
 }
@@ -161,6 +163,11 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
                                 let (dest, packets) = {
                                     let state = dispatcher.state.read().await;
                                     let dest = state.discovered_nodes.get(&src_addr)
+                                        .or_else(|| {
+                                            state.discovered_nodes.iter()
+                                                .find(|(k, _)| *k.ip() == src_ip)
+                                                .map(|(_, v)| v)
+                                        })
                                         .map(|n| n.address)
                                         .unwrap_or(SocketAddrV4::new(src_ip, 65_023));
                                     let rd = dispatcher.response_data.lock().unwrap();
@@ -178,11 +185,25 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
                         if is_dj_packet(&packet.data) {
                             let mut state = dispatcher.state.write().await;
                             let mut created_new_ctrl = false;
-                            let node_addr = state.discovered_nodes.get(&src_addr)
+                            // Two-pass routing: prefer exact src_addr match, then any
+                            // entry sharing src_ip. This routes waveform responses
+                            // (source port 65023) and Time broadcasts (source port
+                            // 60001) to the single DjController registered via OptIn
+                            // (source port 60000), preventing spurious duplicate entries.
+                            let key = if state.discovered_nodes.contains_key(&src_addr) {
+                                src_addr
+                            } else if let Some(&k) = state.discovered_nodes.keys()
+                                .find(|k| *k.ip() == src_ip)
+                            {
+                                k
+                            } else {
+                                src_addr
+                            };
+                            let node_addr = state.discovered_nodes.get(&key)
                                 .map(|n| n.address)
                                 .unwrap_or(SocketAddrV4::new(src_ip, 65_023));
                             state.discovered_nodes
-                                .entry(src_addr)
+                                .entry(key)
                                 .and_modify(|foreign_node| {
                                     if foreign_node.dj_controller.is_none() {
                                         let (ctrl, task_fut) = DjController::new(

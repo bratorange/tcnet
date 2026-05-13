@@ -18,7 +18,7 @@ use crate::node::tcnet_packet_serde::{
     MetricsData, MixerChannel, MixerData, NodeOptions, NodeType, OptInData,
     RequestData, RequestDataType, StatusData, TimePacketData,
 };
-use crate::{ApplicationConfig, DjControllerView, TCNetClient};
+use crate::{ApplicationConfig, TCNetClient};
 use crate::into_ascii;
 
 // ---------------------------------------------------------------------------
@@ -524,4 +524,101 @@ fn test_request_response() {
     let pkts = recv_packets(1);
     assert!(matches!(pkts.first(), Some(crate::node::tcnet_packet::Data::Mixer(_))),
         "MixerData response: {:?}", pkts);
+}
+
+// ---------------------------------------------------------------------------
+// Waveform routing regression test
+// ---------------------------------------------------------------------------
+// Verifies two properties of the routing fix:
+// 1. SmallWaveform responses are sent from port 60000 (broadcast_socket), not 65023.
+// 2. A REQUEST arriving from a different source port than the OptIn registration
+//    is still routed to the correct discovered node address (IP-based fallback).
+//
+// Uses raw sockets instead of a second TCNetClient to avoid the port-60000
+// conflict that prevents two in-process clients from doing broadcast discovery.
+
+#[test]
+#[serial]
+fn test_waveform_routing() {
+    use crate::active_node::TrackMeta;
+    use crate::node::tcnet_packet::Packet;
+
+    let _ = env_logger::try_init();
+
+    // Master node
+    let mut master_cfg = ApplicationConfig::default();
+    master_cfg.node_type = NodeType::Master;
+    let master_client = TCNetClient::new(master_cfg);
+    let mut active = master_client.create_active_node();
+    sleep(Duration::from_millis(400));
+
+    active.load_track(LayerId::L1, TrackMeta {
+        title: "Test Track".into(),
+        artist: "Test Artist".into(),
+        duration_ms: 60_000,
+        bpm: 120.0,
+        track_id: 99,
+    }).expect("load_track failed");
+    sleep(Duration::from_millis(150));
+
+    let dest: SocketAddr = "127.0.0.1:60000".parse().unwrap();
+
+    // Socket A: registers the viewer address via OptIn.
+    // The master will unicast responses to this address.
+    let viewer = UdpSocket::bind("127.0.0.1:0").expect("bind viewer");
+    viewer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    let viewer_port = viewer.local_addr().unwrap().port();
+
+    let viewer_cfg = ApplicationConfig {
+        node_type: NodeType::Slave,
+        address: SocketAddrV4::new(Ipv4Addr::LOCALHOST, viewer_port),
+        ..master_cfg
+    };
+    let (h, d) = opt_in_bytes(&viewer_cfg, 0);
+    send_packet(&viewer, dest, h, d);
+    sleep(Duration::from_millis(150));
+
+    // Socket B: sends the REQUEST from a *different* source port to exercise
+    // the IP-based routing fallback in the REQUEST handler.
+    // The response must still arrive at viewer (socket A) because that is the
+    // registered node address, not at socket B.
+    let requester = UdpSocket::bind("127.0.0.1:0").expect("bind requester");
+    let header = management_header(&viewer_cfg, 20, 201);
+    let req = RequestData { data_type: RequestDataType::SmallWaveformData, layer: LayerId::L1 };
+    let payload = [header.to_bytes().unwrap(), req.to_bytes().unwrap()].concat();
+    requester.send_to(&payload, dest).expect("send REQUEST");
+
+    // Receive the SmallWaveform response on the viewer socket (the registered address).
+    // Skip proactive broadcasts (OptIn/OptOut/Time/Status) as in test_request_response.
+    let mut buf = [0u8; 8192];
+    let mut got_waveform = false;
+    let mut response_src_port = 0u16;
+    loop {
+        match viewer.recv_from(&mut buf) {
+            Ok((size, src)) => {
+                if let Ok(pkt) = Packet::deserialize_packet(&buf[..size]) {
+                    match pkt.data {
+                        crate::node::tcnet_packet::Data::OptIn(_)
+                        | crate::node::tcnet_packet::Data::OptOut(_)
+                        | crate::node::tcnet_packet::Data::Time(_)
+                        | crate::node::tcnet_packet::Data::Status(_) => {}
+                        crate::node::tcnet_packet::Data::SmallWaveform(_) => {
+                            response_src_port = src.port();
+                            got_waveform = true;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    assert!(got_waveform, "SmallWaveform response not received — IP-based routing fallback broken");
+    assert_eq!(
+        response_src_port, 60000,
+        "SmallWaveform came from port {} instead of 60000 — send task must use broadcast_socket",
+        response_src_port
+    );
 }

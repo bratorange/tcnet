@@ -312,7 +312,7 @@ async fn dj_controller_task(
     loop {
         // --- drain incoming packets ---
         let mut packets = Vec::new();
-        let _ = packet_rx.drain_into(&mut packets);
+        if packet_rx.drain_into(&mut packets).is_err() { break; }
 
         for packet in packets {
             // check if this packet satisfies a pending request
@@ -384,7 +384,7 @@ async fn dj_controller_task(
 
         // --- drain user requests ---
         let mut requests = Vec::new();
-        let _ = request_rx.drain_into(&mut requests);
+        if request_rx.drain_into(&mut requests).is_err() { break; }
 
         for req in requests {
             match req {

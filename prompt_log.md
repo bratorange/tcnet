@@ -115,3 +115,19 @@ When starting the simulator and the viewer, the communication between them two i
 - currently the propagated node count is not as specified by the TCNet-V3-5-1B.pdf spec. Fix that.
 - Make sure that the viewer not only receives real time updates from the simulator, but also displays them
 - Not all unit tests are passing currently. does that coincide with the problems above?
+
+great. that seems to have worked. I tested it manually.
+however allways after 20 to 60s the syncronization would become unreliable or did not work at all anymroe.
+- you can find logs of one of these runs in simulator.log and viewer.log
+- try to reproduce the problem and fix it
+- if you were able to reproduce the problem and fix it, implement a test for future regressions
+- also the viewer would not display waveforms. fix that. the simulator does not need to produce super nice waveforms,
+but it should send something to the viewer, to verify that the mechansism works.
+- the same goes for all other track data and metadata.
+- for the beatgrid implement a very basic beatgrid detector using the oximedia-mir library
+- make both guis ai agent accesible via mcp
+- implement an mcp server which can be used to access the gui and the dj controller
+- use egui-mcp
+- im not sure whether it works on macos. if not, create a podman container with gui env inside it
+  so that ai agents can use that in the future
+- verify that that the mcp server works by using it to access the guis and interacting with them
