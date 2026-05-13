@@ -107,3 +107,11 @@ I want it to be possible to have two tcnetrs based nodes on one computer. dont u
 with another for all 4 ports respectively. and update the node config if its the unicastport. other nodes will still be able to receive messages if non standard ports are used, if they themself listen on the default      
 broadcasting ports 60000, 60001 and 60002. only communication between two nodes which dont use standard broadcasing ports for listening. All nodes independent if they bound canonical ports or not shall however still      
 target their packages to the canonical broadcasting ports and the announced unicast port. this behavior is also partly described in the spec pdf 
+
+When starting the simulator and the viewer, the communication between them two is not really established and the states are not updated 
+- Find out why that is and fix it
+- The viewer shall be able to display the state of the simulator
+- When starting the the apps with trace level log, all messages can be seen
+- currently the propagated node count is not as specified by the TCNet-V3-5-1B.pdf spec. Fix that.
+- Make sure that the viewer not only receives real time updates from the simulator, but also displays them
+- Not all unit tests are passing currently. does that coincide with the problems above?

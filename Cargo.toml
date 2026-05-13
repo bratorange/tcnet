@@ -40,3 +40,6 @@ eframe = { version = "0.31", optional = true, features = ["wgpu"] }
 egui = { version = "0.31", optional = true }
 rodio = { version = "0.20", optional = true, features = ["symphonia-all"] }
 lofty = { version = "0.22", optional = true }
+
+[dev-dependencies]
+serial_test = "3"

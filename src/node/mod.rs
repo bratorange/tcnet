@@ -52,7 +52,7 @@ impl Default for ApplicationConfig {
             application_bug_version: 102,
             node_name: into_ascii!("Default_"),
             node_options: NodeOptions::empty(),
-            address: SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0),
+            address: SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 65_023),
         }
     }
 }

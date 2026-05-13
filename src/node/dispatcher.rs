@@ -52,10 +52,11 @@ async fn bind_with_fallback(ip: Ipv4Addr, preferred_port: u16, enable_broadcast:
                 if enable_broadcast {
                     socket.set_broadcast(true).expect("set_broadcast failed");
                 }
-                if port != preferred_port {
-                    info!("Port {} busy; using {} instead", preferred_port, port);
+                let actual = socket.local_addr().map(|a| a.port()).unwrap_or(port);
+                if actual != preferred_port && preferred_port != 0 {
+                    info!("Port {} busy; using {} instead", preferred_port, actual);
                 }
-                return (socket, port);
+                return (socket, actual);
             }
             Err(_) if port < 65_534 => port += 1,
             Err(e) => panic!("Could not bind any port starting from {}: {}", preferred_port, e),
@@ -385,16 +386,35 @@ async fn active_broadcast(
     let mut seq: u8 = 128;
 
     loop {
-        // Status packets — broadcast on port 60000.
+        // Read node count and addresses once per loop iteration.
+        let (node_count, all_addrs, slave_addrs) = {
+            let state = dispatcher.state.read().await;
+            let node_count = (state.discovered_nodes.len() + 1) as u16;
+            let all_addrs: Vec<SocketAddrV4> = state.discovered_nodes.values()
+                .map(|n| n.address)
+                .collect();
+            let slave_addrs: Vec<SocketAddrV4> = state.discovered_nodes.values()
+                .filter(|n| matches!(n.config.node_type, NodeType::Slave | NodeType::Repeater))
+                .map(|n| n.address)
+                .collect();
+            (node_count, all_addrs, slave_addrs)
+        };
+
+        // Status packets — broadcast on port 60000, plus unicast to all discovered nodes.
+        // Nodes that fell back to a non-canonical port still receive Status via unicast.
         let mut msgs: Vec<Data> = Vec::new();
         let _ = dispatcher.active_broadcast_rx.drain_into(&mut msgs);
-        for data in msgs {
+        for mut data in msgs {
+            if let Data::Status(ref mut s) = data { s.node_count = node_count; }
             let (msg_type_id, _) = data.message_type_id();
             let header = management_header(&dispatcher.node_config, msg_type_id, seq);
             seq = seq.wrapping_add(1);
             let packet = Packet { header, data };
             if let Ok(bytes) = packet.to_bytes() {
                 for addr in &broadcast_addrs_60000 {
+                    let _ = socket_60000.send_to(&bytes, addr).await;
+                }
+                for addr in &all_addrs {
                     let _ = socket_60000.send_to(&bytes, addr).await;
                 }
             }
@@ -404,13 +424,6 @@ async fn active_broadcast(
         let mut slave_msgs: Vec<Data> = Vec::new();
         let _ = dispatcher.active_slave_unicast_rx.drain_into(&mut slave_msgs);
         if !slave_msgs.is_empty() {
-            let slave_addrs: Vec<SocketAddrV4> = {
-                let state = dispatcher.state.read().await;
-                state.discovered_nodes.values()
-                    .filter(|n| matches!(n.config.node_type, NodeType::Slave | NodeType::Repeater))
-                    .map(|n| n.address)
-                    .collect()
-            };
             for data in slave_msgs {
                 let (msg_type_id, _) = data.message_type_id();
                 let header = management_header(&dispatcher.node_config, msg_type_id, seq);
@@ -424,7 +437,9 @@ async fn active_broadcast(
             }
         }
 
-        // Time packets — broadcast on port 60001.
+        // Time packets — broadcast on port 60001 AND unicast to all discovered nodes.
+        // Unicast uses socket_60000 so src_addr matches the key used during OptIn discovery.
+        // Per spec, time packets shall be unicasted to each known node in addition to broadcast.
         let mut time_msgs: Vec<Data> = Vec::new();
         let _ = dispatcher.active_time_rx.drain_into(&mut time_msgs);
         for data in time_msgs {
@@ -436,6 +451,9 @@ async fn active_broadcast(
                 for addr in &broadcast_addrs_60001 {
                     trace!("Sending time packet to {}: {:?}", addr, packet);
                     let _ = socket_60001.send_to(&bytes, addr).await;
+                }
+                for addr in &all_addrs {
+                    let _ = socket_60000.send_to(&bytes, addr).await;
                 }
             }
         }

@@ -182,7 +182,7 @@ pub(crate) fn management_header(app_config: &ApplicationConfig, message_type: u8
 pub(crate) fn opt_in_packet(app_config: &ApplicationConfig, node_state: &DynamicNodeState, seq: u8) -> Result<Vec<u8>, DekuError> {
     let header = management_header(app_config, 2, seq);
     let data = OptInData{
-        node_count: node_state.discovered_nodes.len() as u16,
+        node_count: (node_state.discovered_nodes.len() + 1) as u16,
         node_listener_port: app_config.address.port(),
         uptime: node_state.uptime,
         _reserved0: Default::default(),

@@ -6,6 +6,7 @@
 //!   cargo test -- --test-threads=1 --nocapture
 //! (single-threaded because the client binds fixed ports 60000-60002 + 65023)
 
+use serial_test::serial;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::thread::sleep;
 use std::time::Duration;
@@ -307,6 +308,7 @@ fn mixer_bytes(config: &ApplicationConfig, seq: u8) -> (Vec<u8>, Vec<u8>) {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[serial]
 fn test_cdj_play_session() {
     let _ = env_logger::try_init();
     let dest: SocketAddr = "127.0.0.1:60000".parse().unwrap();
@@ -403,6 +405,7 @@ fn test_cdj_play_session() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[serial]
 fn test_request_response() {
     use crate::active_node::TrackMeta;
     use crate::node::tcnet_packet::Packet;
@@ -443,7 +446,7 @@ fn test_request_response() {
     send_packet(&viewer, dest, h, d);
     sleep(Duration::from_millis(150));
 
-    // Receive packets, skipping OptIn/OptOut broadcasts, until expected count or timeout.
+    // Receive REQUEST-response packets, skipping proactive broadcasts (OptIn/OptOut/Time/Status).
     let recv_packets = |expected: usize| -> Vec<crate::node::tcnet_packet::Data> {
         use crate::node::tcnet_packet::Data as D;
         let mut collected = Vec::new();
@@ -453,7 +456,7 @@ fn test_request_response() {
                 Ok((size, _)) => {
                     if let Ok(pkt) = Packet::deserialize_packet(&buf[..size]) {
                         match pkt.data {
-                            D::OptIn(_) | D::OptOut(_) => {}
+                            D::OptIn(_) | D::OptOut(_) | D::Time(_) | D::Status(_) => {}
                             data => {
                                 collected.push(data);
                                 if collected.len() >= expected { break; }
