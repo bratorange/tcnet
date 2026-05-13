@@ -622,3 +622,61 @@ fn test_waveform_routing() {
         response_src_port
     );
 }
+
+// ---------------------------------------------------------------------------
+// Loopback discovery test (DJ Link Bridge scenario)
+// ---------------------------------------------------------------------------
+// Verifies that when another process already holds port 60000 (simulating
+// DJ Link Bridge), our client still broadcasts OptIn on the loopback network
+// and can then receive and route DJ packets from the "remote" node.
+
+#[test]
+#[serial]
+fn test_loopback_discovery() {
+    use crate::node::tcnet_packet::{Data, Packet};
+
+    let _ = env_logger::try_init();
+
+    // 1. Occupy port 60000 — mimics DJ Link Bridge holding the canonical port.
+    let dj_link = UdpSocket::bind("127.0.0.1:60000").expect("bind port 60000");
+    dj_link.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+
+    // 2. Create viewer — its broadcast socket falls back to a non-60000 port.
+    let client = TCNetClient::new(ApplicationConfig::default());
+    sleep(Duration::from_millis(500));
+
+    // 3. Wait for viewer's loopback OptIn broadcast (Step 1 fix).
+    let mut buf = [0u8; 8192];
+    let (size, _) = dj_link
+        .recv_from(&mut buf)
+        .expect("no loopback OptIn received — broadcast fix missing");
+
+    // 4. Parse to get viewer's unicast listener port from the OptIn payload.
+    let pkt = Packet::deserialize_packet(&buf[..size]).expect("parse failed");
+    let listener_port = match &pkt.data {
+        Data::OptIn(o) => o.node_listener_port,
+        _ => panic!("expected OptIn, got {:?}", pkt.data),
+    };
+
+    // 5. Send fake OptIn from DJ Link's socket → viewer's unicast port.
+    let viewer_unicast: SocketAddr = format!("127.0.0.1:{}", listener_port).parse().unwrap();
+    let dj_cfg = ApplicationConfig {
+        node_type: NodeType::Master,
+        address: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 60_000),
+        ..ApplicationConfig::default()
+    };
+    let (h, d) = opt_in_bytes(&dj_cfg, 0);
+    send_packet(&dj_link, viewer_unicast, h, d);
+    sleep(Duration::from_millis(100));
+
+    // 6. Send fake Metrics → triggers DjController creation via the existing is_dj_packet path.
+    let (h, d) = metrics_l1_bytes(&dj_cfg, 1);
+    send_packet(&dj_link, viewer_unicast, h, d);
+    sleep(Duration::from_millis(200));
+
+    // 7. DjController must now exist with the correct BPM.
+    let mut view = client
+        .get_any_controller_view()
+        .expect("DjControllerView not available after Metrics — loopback discovery broken");
+    assert_eq!(view.get_layers()[0].bpm.0, TRACK_1_BPM, "BPM mismatch");
+}

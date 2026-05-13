@@ -124,6 +124,19 @@ however allways after 20 to 60s the syncronization would become unreliable or di
 - also the viewer would not display waveforms. fix that. the simulator does not need to produce super nice waveforms,
 but it should send something to the viewer, to verify that the mechansism works.
 - the same goes for all other track data and metadata.
+
+- before you continue: I seemed to be more reliable now.
+- I like to use the pro dj link bridge without anything connected as test for this library
+- When I opened the viewer first and the dj link second, they were actually able to to communicate, since
+dj link bridge also has this behavior, where it uses other ports if the canonical ports are not available.
+However when I opened the viewer first and the dj link second, the connection seemed to not work
+- See dj_link_capture.pcapng for a capture of which messages were sent in that second failing setup
+- Identify the root cause of the connection issue and if it is a bug in this library, or behaviour of the dj link bridge
+- If it is a bug in this library, fix it
+- pro dj link can be opened from /Applications/PRO\ DJ\ LINK\ Bridge.app
+
+
+
 - for the beatgrid implement a very basic beatgrid detector using the oximedia-mir library
 - make both guis ai agent accesible via mcp
 - implement an mcp server which can be used to access the gui and the dj controller

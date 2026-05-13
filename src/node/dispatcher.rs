@@ -321,10 +321,20 @@ async fn send(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) {
 }
 
 async fn broadcast(dispatcher: Arc<Dispatcher>, broadcast_socket: Arc<UdpSocket>) {
-    let ipv4_addrs = best_local_ipv4_addrs()
+    let mut ipv4_addrs = best_local_ipv4_addrs()
         .expect("Could not get local IPv4 addresses")
         .iter().map(|net| SocketAddrV4::new(net.broadcast(), 60_000))
         .collect::<HashSet<_>>();
+    // When we fell back from port 60000 (another process owns it), also broadcast on the
+    // loopback network so applications like DJ Link Bridge that are bound to 127.0.0.1
+    // can discover us.
+    let on_fallback_port = broadcast_socket
+        .local_addr()
+        .map(|a| a.port() != 60_000)
+        .unwrap_or(false);
+    if on_fallback_port {
+        ipv4_addrs.insert(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 60_000));
+    }
     info!("Broadcasting opt in packets to {:?}", ipv4_addrs);
     let mut tick = interval(Duration::from_secs(1));
     loop {
@@ -393,11 +403,16 @@ async fn active_broadcast(
     socket_60000: Arc<UdpSocket>,
     socket_60001: Arc<UdpSocket>,
 ) {
-    let broadcast_addrs_60000: HashSet<SocketAddr> = best_local_ipv4_addrs()
+    let mut broadcast_addrs_60000: HashSet<SocketAddr> = best_local_ipv4_addrs()
         .expect("Could not get local IPv4 addresses")
         .iter()
         .map(|net| SocketAddr::V4(SocketAddrV4::new(net.broadcast(), 60_000)))
         .collect();
+    let on_fallback = socket_60000.local_addr().map(|a| a.port() != 60_000).unwrap_or(false);
+    if on_fallback {
+        broadcast_addrs_60000.insert(SocketAddr::V4(SocketAddrV4::new(
+            Ipv4Addr::LOCALHOST, 60_000)));
+    }
     let broadcast_addrs_60001: HashSet<SocketAddr> = best_local_ipv4_addrs()
         .expect("Could not get local IPv4 addresses")
         .iter()
