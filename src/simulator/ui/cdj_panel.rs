@@ -151,6 +151,7 @@ pub fn show(
 
         // Interaction
         let resp = child_ui.allocate_rect(btn_rect, Sense::click());
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, *label_btn));
         if resp.clicked() {
             match *label_btn {
                 "PLAY" => deck.toggle_play_pause(node),
@@ -177,6 +178,7 @@ pub fn show(
     let mut bpm = deck.bpm;
     let original_bpm = bpm;
     let resp = slider_horizontal(child_ui, &painter, slider_rect, &mut bpm, 60.0, 200.0, CDJ_ACCENT);
+    resp.widget_info(|| egui::WidgetInfo::slider(true, bpm as f64, "TEMPO"));
     if resp.dragged() && (bpm - original_bpm).abs() > 0.05 {
         deck.set_tempo(bpm, node);
     }
@@ -192,6 +194,8 @@ pub fn show(
         );
         painter.rect_filled(r, 4.0, CDJ_BTN);
         painter.text(r.center(), egui::Align2::CENTER_CENTER, lbl, egui::FontId::proportional(10.0), CDJ_DIM);
+        let resp = child_ui.allocate_rect(r, Sense::click());
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, *lbl));
     }
 
     // --- Browse / Load buttons ---
@@ -205,9 +209,11 @@ pub fn show(
     painter.rect_filled(browse_rect, 5.0, CDJ_ACCENT);
     painter.text(browse_rect.center(), egui::Align2::CENTER_CENTER, "BROWSE", egui::FontId::proportional(12.0), CDJ_TEXT);
 
-    if child_ui.allocate_rect(browse_rect, Sense::click()).clicked()
-        || child_ui.allocate_rect(load_rect, Sense::click()).clicked()
-    {
+    let browse_resp = child_ui.allocate_rect(browse_rect, Sense::click());
+    browse_resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "BROWSE"));
+    let load_resp = child_ui.allocate_rect(load_rect, Sense::click());
+    load_resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "LOAD"));
+    if browse_resp.clicked() || load_resp.clicked() {
         result.open_browser = true;
     }
 

@@ -3,7 +3,7 @@ USB_DIR ?= .
 APP_BUNDLE = /Applications/DJSimulator.app
 BINARY    = $(APP_BUNDLE)/Contents/MacOS/DJSimulator
 
-.PHONY: build run-simulator stop-simulator
+.PHONY: build run-simulator run-simulator-mcp stop-simulator
 
 build:
 	cargo build --features simulator,mcp --bin simulator
@@ -19,3 +19,10 @@ run-simulator: build
 
 stop-simulator:
 	-kill $$(pgrep DJSimulator) 2>/dev/null; true
+
+# Build and run the simulator as a plain binary (no .app wrapper needed for egui-mcp).
+# The IPC socket is at /tmp/egui-mcp.sock — egui-mcp tools connect automatically.
+run-simulator-mcp: build
+	-kill $$(pgrep simulator) 2>/dev/null; true
+	sleep 0.3
+	RUST_LOG=warn ./target/debug/simulator --bind-ip $(BIND_IP) --usb-dir $(USB_DIR) &

@@ -1369,8 +1369,6 @@ dependencies = [
 [[package]]
 name = "egui-mcp-client"
 version = "0.0.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b1a57644979adc03e4efeb9a13f406a04aef3c6e06b1229f38f2a374ffbe4aa"
 dependencies = [
  "base64",
  "egui",
@@ -1385,8 +1383,6 @@ dependencies = [
 [[package]]
 name = "egui-mcp-protocol"
 version = "0.0.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b57f1de8e1fa6683dca5847baefb4beab9e0e44133333ea2682303cc877df8e"
 dependencies = [
  "serde",
  "serde_json",
@@ -4582,12 +4578,14 @@ checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 name = "tcnet-rs"
 version = "0.1.0"
 dependencies = [
+ "accesskit",
  "bitflags 2.11.0",
  "clap",
  "deku",
  "eframe",
  "egui",
  "egui-mcp-client",
+ "egui-mcp-protocol",
  "env_logger",
  "getifs",
  "image",
@@ -6416,3 +6414,7 @@ dependencies = [
  "syn",
  "winnow 1.0.2",
 ]
+
+[[patch.unused]]
+name = "egui-mcp-server"
+version = "0.0.5"

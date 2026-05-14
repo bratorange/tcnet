@@ -145,3 +145,17 @@ However when I opened the viewer first and the dj link second, the connection se
   so that ai agents can use that in the future
 - verify that that the mcp server works by using it to access the guis and interacting with them
 - currently the viewer freeze in its last preview mode even if the node is not connected anymore. fix that.
+
+
+Now for a bigger task
+- Merge the phrase viewer from ~/Python/all-in-one/vizualizer together with the viewer from this project into a new app "LUCHS"
+- how it should look is described in luchs_spec.md
+- the layout can be seen in in Luchs.png
+- Make sure to verify the gui that you build with screenshots and interacting with it. through the egui-mcp-server
+- Every button which is implemented must be tested by you using the egui-mcp-server
+- after you are finished you should test the gui with the ai agent and verify that it works as expected
+i.e. by loading a track in the simulator (which is not part of LUCHS, and only there for testing purposes),
+then verify that all functional elements of the gui work as expected and show meaningful data, which could be correct
+- the allin1 model lays in  ~/Python/all-in-one
+- There is a lot of potential for bugs in this project, so make sure to thoroughly test everything and report any issues found.
+- verify that all stays synchronized as this is currently the most common source of bugs

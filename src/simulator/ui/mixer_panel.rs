@@ -51,7 +51,9 @@ pub fn show(ui: &mut Ui, mixer: &mut MixerSnapshot, node: &mut ActiveDJNode) {
     );
     let xfader_rect = Rect::from_min_size(xfader_top + vec2(0.0, 12.0), vec2(inner.width(), 22.0));
     let mut xfader = mixer.crossfader as f32 / 255.0;
-    if horizontal_slider(child_ui, &painter, xfader_rect, &mut xfader, MX_ACCENT).dragged() {
+    let xfader_resp = horizontal_slider(child_ui, &painter, xfader_rect, &mut xfader, MX_ACCENT);
+    xfader_resp.widget_info(|| egui::WidgetInfo::slider(true, xfader as f64, "CROSSFADER"));
+    if xfader_resp.dragged() {
         mixer.crossfader = (xfader * 255.0) as u8;
         let _ = node.set_crossfader(mixer.crossfader);
     }
@@ -61,7 +63,9 @@ pub fn show(ui: &mut Ui, mixer: &mut MixerSnapshot, node: &mut ActiveDJNode) {
     painter.text(master_top, egui::Align2::LEFT_TOP, "MASTER", egui::FontId::proportional(9.0), MX_DIM);
     let master_rect = Rect::from_min_size(master_top + vec2(0.0, 12.0), vec2(inner.width() / 2.0 - 4.0, 22.0));
     let mut master = mixer.master_fader_level as f32 / 255.0;
-    if horizontal_slider(child_ui, &painter, master_rect, &mut master, MX_ACCENT).dragged() {
+    let master_resp = horizontal_slider(child_ui, &painter, master_rect, &mut master, MX_ACCENT);
+    master_resp.widget_info(|| egui::WidgetInfo::slider(true, master as f64, "MASTER"));
+    if master_resp.dragged() {
         mixer.master_fader_level = (master * 255.0) as u8;
         let _ = node.set_master_fader(mixer.master_fader_level);
     }
@@ -76,7 +80,9 @@ pub fn show(ui: &mut Ui, mixer: &mut MixerSnapshot, node: &mut ActiveDJNode) {
         MX_DIM,
     );
     let mut booth = mixer.booth_level as f32 / 255.0;
-    if horizontal_slider(child_ui, &painter, booth_rect, &mut booth, MX_ACCENT).dragged() {
+    let booth_resp = horizontal_slider(child_ui, &painter, booth_rect, &mut booth, MX_ACCENT);
+    booth_resp.widget_info(|| egui::WidgetInfo::slider(true, booth as f64, "BOOTH"));
+    if booth_resp.dragged() {
         mixer.booth_level = (booth * 255.0) as u8;
     }
 
@@ -87,7 +93,9 @@ pub fn show(ui: &mut Ui, mixer: &mut MixerSnapshot, node: &mut ActiveDJNode) {
     let bfx_color = if mixer.beat_fx_on { MX_CUE_ON } else { MX_BTN };
     painter.rect_filled(bfx_btn, 3.0, bfx_color);
     painter.text(bfx_btn.center(), egui::Align2::CENTER_CENTER, "ON", egui::FontId::proportional(9.0), MX_TEXT);
-    if child_ui.allocate_rect(bfx_btn, Sense::click()).clicked() {
+    let bfx_resp = child_ui.allocate_rect(bfx_btn, Sense::click());
+    bfx_resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, mixer.beat_fx_on, "BEAT FX ON"));
+    if bfx_resp.clicked() {
         mixer.beat_fx_on = !mixer.beat_fx_on;
     }
 }
@@ -121,7 +129,9 @@ fn draw_channel(
     y += 10.0;
     let trim_rect = Rect::from_min_size(pos2(inner.min.x, y), vec2(inner.width(), 18.0));
     let mut trim = mixer.channels[ch].trim_level as f32 / 255.0;
-    if vertical_to_horizontal_knob(ui, painter, trim_rect, &mut trim).dragged() {
+    let trim_resp = vertical_to_horizontal_knob(ui, painter, trim_rect, &mut trim);
+    trim_resp.widget_info(|| egui::WidgetInfo::slider(true, trim as f64, format!("CH{} TRIM", ch + 1)));
+    if trim_resp.dragged() {
         mixer.channels[ch].trim_level = (trim * 255.0) as u8;
         let _ = node.set_channel_trim(ch, mixer.channels[ch].trim_level);
     }
@@ -132,7 +142,9 @@ fn draw_channel(
     y += 10.0;
     let hi_rect = Rect::from_min_size(pos2(inner.min.x, y), vec2(inner.width(), 18.0));
     let mut hi = mixer.channels[ch].eq_hi as f32 / 255.0;
-    if vertical_to_horizontal_knob(ui, painter, hi_rect, &mut hi).dragged() {
+    let hi_resp = vertical_to_horizontal_knob(ui, painter, hi_rect, &mut hi);
+    hi_resp.widget_info(|| egui::WidgetInfo::slider(true, hi as f64, format!("CH{} EQ HI", ch + 1)));
+    if hi_resp.dragged() {
         mixer.channels[ch].eq_hi = (hi * 255.0) as u8;
         let mid = mixer.channels[ch].eq_hi_mid;
         let low = mixer.channels[ch].eq_low;
@@ -145,7 +157,9 @@ fn draw_channel(
     y += 10.0;
     let mid_rect = Rect::from_min_size(pos2(inner.min.x, y), vec2(inner.width(), 18.0));
     let mut mid = mixer.channels[ch].eq_hi_mid as f32 / 255.0;
-    if vertical_to_horizontal_knob(ui, painter, mid_rect, &mut mid).dragged() {
+    let mid_resp = vertical_to_horizontal_knob(ui, painter, mid_rect, &mut mid);
+    mid_resp.widget_info(|| egui::WidgetInfo::slider(true, mid as f64, format!("CH{} EQ MID", ch + 1)));
+    if mid_resp.dragged() {
         mixer.channels[ch].eq_hi_mid = (mid * 255.0) as u8;
         let hi = mixer.channels[ch].eq_hi;
         let low = mixer.channels[ch].eq_low;
@@ -158,7 +172,9 @@ fn draw_channel(
     y += 10.0;
     let low_rect = Rect::from_min_size(pos2(inner.min.x, y), vec2(inner.width(), 18.0));
     let mut low = mixer.channels[ch].eq_low as f32 / 255.0;
-    if vertical_to_horizontal_knob(ui, painter, low_rect, &mut low).dragged() {
+    let low_resp = vertical_to_horizontal_knob(ui, painter, low_rect, &mut low);
+    low_resp.widget_info(|| egui::WidgetInfo::slider(true, low as f64, format!("CH{} EQ LOW", ch + 1)));
+    if low_resp.dragged() {
         mixer.channels[ch].eq_low = (low * 255.0) as u8;
         let hi = mixer.channels[ch].eq_hi;
         let mid = mixer.channels[ch].eq_hi_mid;
@@ -171,7 +187,9 @@ fn draw_channel(
     y += 10.0;
     let flt_rect = Rect::from_min_size(pos2(inner.min.x, y), vec2(inner.width(), 18.0));
     let mut flt = mixer.channels[ch].filter_color as f32 / 255.0;
-    if vertical_to_horizontal_knob(ui, painter, flt_rect, &mut flt).dragged() {
+    let flt_resp = vertical_to_horizontal_knob(ui, painter, flt_rect, &mut flt);
+    flt_resp.widget_info(|| egui::WidgetInfo::slider(true, flt as f64, format!("CH{} FILTER", ch + 1)));
+    if flt_resp.dragged() {
         mixer.channels[ch].filter_color = (flt * 255.0) as u8;
         let _ = node.set_channel_filter(ch, mixer.channels[ch].filter_color);
     }
@@ -184,7 +202,9 @@ fn draw_channel(
         vec2(inner.width() / 2.0, 80.0),
     );
     let mut fader = mixer.channels[ch].fader_level as f32 / 255.0;
-    if vertical_fader(ui, painter, fader_rect, &mut fader).dragged() {
+    let fader_resp = vertical_fader(ui, painter, fader_rect, &mut fader);
+    fader_resp.widget_info(|| egui::WidgetInfo::slider(true, fader as f64, format!("CH{} FADER", ch + 1)));
+    if fader_resp.dragged() {
         mixer.channels[ch].fader_level = (fader * 255.0) as u8;
         let _ = node.set_channel_fader(ch, mixer.channels[ch].fader_level);
         // Update on_air state
@@ -200,7 +220,9 @@ fn draw_channel(
     let cue_color = if mixer.channels[ch].cue_a { MX_CUE_ON } else { MX_BTN };
     painter.rect_filled(cue_rect, 3.0, cue_color);
     painter.text(cue_rect.center(), egui::Align2::CENTER_CENTER, "CUE", egui::FontId::proportional(9.0), MX_TEXT);
-    if ui.allocate_rect(cue_rect, Sense::click()).clicked() {
+    let cue_resp = ui.allocate_rect(cue_rect, Sense::click());
+    cue_resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, mixer.channels[ch].cue_a, &format!("CH{} CUE", ch + 1)));
+    if cue_resp.clicked() {
         mixer.channels[ch].cue_a = !mixer.channels[ch].cue_a;
         let _ = node.set_channel_cue(ch, mixer.channels[ch].cue_a, mixer.channels[ch].cue_b);
     }

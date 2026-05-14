@@ -23,7 +23,7 @@ path = "src/bin/viewer.rs"
 required-features = ["viewer"]
 
 [features]
-simulator = ["dep:eframe", "dep:egui", "dep:rodio", "dep:lofty", "dep:egui-mcp-client", "dep:image"]
+simulator = ["dep:eframe", "dep:egui", "dep:rodio", "dep:lofty", "dep:egui-mcp-client", "dep:egui-mcp-protocol", "dep:image", "egui/accesskit", "dep:accesskit"]
 viewer = ["dep:eframe", "dep:egui"]
 mcp = ["dep:rmcp", "dep:serde_json"]
 
@@ -44,6 +44,8 @@ kanal = "0.1.1"
 triple_buffer = "9"
 eframe = { version = "0.33", optional = true, features = ["wgpu"] }
 egui = { version = "0.33", optional = true }
+accesskit = { version = "0.21", optional = true }
+egui-mcp-protocol = { version = "0.0.5", optional = true }
 egui-mcp-client = { version = "0.0.5", optional = true }
 image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
 rodio = { version = "0.20", optional = true, features = ["symphonia-all"] }
@@ -53,3 +55,8 @@ serde_json = { version = "1", optional = true }
 
 [dev-dependencies]
 serial_test = "3"
+
+[patch.crates-io]
+egui-mcp-protocol = { path = "local_crates/egui-mcp-protocol" }
+egui-mcp-client   = { path = "local_crates/egui-mcp-client"   }
+egui-mcp-server   = { path = "local_crates/egui-mcp-server"   }

@@ -9,7 +9,29 @@ use crate::simulator::ui::{cdj_panel, mixer_panel};
 use crate::simulator::mcp::{SimBridge, SimCmd};
 use std::sync::{Arc, Mutex};
 use egui_mcp_client::McpClient;
+use egui_mcp_protocol::UiTree;
 use image::{ImageBuffer, Rgba, ImageFormat};
+
+/// egui plugin that captures the AccessKit tree from `output_hook`, which runs
+/// after `end_pass()` populates `platform_output.accesskit_update`.
+struct AccessKitCapturePlugin {
+    pending: Arc<Mutex<Option<UiTree>>>,
+}
+
+impl egui::Plugin for AccessKitCapturePlugin {
+    fn debug_name(&self) -> &'static str {
+        "AccessKitCapture"
+    }
+
+    fn output_hook(&mut self, output: &mut egui::FullOutput) {
+        if let Some(tree) = &output.platform_output.accesskit_update {
+            let ui_tree = crate::simulator::accesskit_tree::convert(tree);
+            if let Ok(mut guard) = self.pending.lock() {
+                *guard = Some(ui_tree);
+            }
+        }
+    }
+}
 
 pub struct SimulatorApp {
     deck1: CDJDeck,
@@ -19,11 +41,13 @@ pub struct SimulatorApp {
     audio: AudioEngine,
     usb: VirtualUsb,
     show_browser: bool,
-    browser_target: u8,   // 1 = deck1, 2 = deck2
+    browser_target: u8,
     browser_filter: String,
     bridge: Option<Arc<Mutex<SimBridge>>>,
     mcp_client: McpClient,
     rt: tokio::runtime::Runtime,
+    pending_tree: Arc<Mutex<Option<UiTree>>>,
+    plugin_registered: bool,
 }
 
 impl SimulatorApp {
@@ -52,6 +76,8 @@ impl SimulatorApp {
             bridge,
             mcp_client,
             rt,
+            pending_tree: Arc::new(Mutex::new(None)),
+            plugin_registered: false,
         }
     }
 
@@ -219,6 +245,20 @@ impl eframe::App for SimulatorApp {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.request_repaint_after(std::time::Duration::from_millis(33));
+
+        // Register the AccessKit capture plugin once; it populates pending_tree in output_hook.
+        if !self.plugin_registered {
+            ctx.add_plugin(AccessKitCapturePlugin { pending: self.pending_tree.clone() });
+            self.plugin_registered = true;
+        }
+
+        // Push the tree captured from the previous frame to the IPC server.
+        if let Ok(mut guard) = self.pending_tree.lock() {
+            if let Some(tree) = guard.take() {
+                let client = self.mcp_client.clone();
+                let _ = self.rt.block_on(client.set_ui_tree(tree));
+            }
+        }
 
         // If the MCP server requested a screenshot, ask eframe for one
         if self.rt.block_on(self.mcp_client.take_screenshot_request()) {

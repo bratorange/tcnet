@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "egui-mcp": {
-      "command": "egui-mcp-server",
+      "command": "/Users/juliusschmitt/Rust/tcnet-rs/local_crates/egui-mcp-server/target/debug/egui-mcp-server",
       "args": ["serve"],
       "env": { "EGUI_MCP_APP_NAME": "CDJ Simulator" }
     }

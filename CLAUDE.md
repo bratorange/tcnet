@@ -12,37 +12,123 @@ cargo test                    # run tests
 cargo clippy                  # lint
 cargo fmt                     # format
 
-# Build + launch simulator via the .app wrapper (required for computer-use)
-make run-simulator            # builds, copies binary, relaunches /Applications/DJSimulator.app
+# Build + run simulator (plain binary, for egui-mcp automation — primary workflow)
+make run-simulator-mcp        # builds, kills old instance, starts ./target/debug/simulator in bg
 make stop-simulator           # kill the running instance
+
+# Build + launch simulator via the .app wrapper (required for computer-use / ScreenCaptureKit)
+make run-simulator            # builds, copies binary, relaunches /Applications/DJSimulator.app
 ```
 
-## GUI Verification Workflow (computer-use)
+## egui-mcp on macOS
 
-The simulator runs as a proper macOS `.app` bundle so that Claude Code's `computer-use` MCP can grant it screen-capture access via ScreenCaptureKit.
+egui-mcp gives Claude semantic UI access (find/click/screenshot widgets by label, role, or ID) without AT-SPI (Linux-only) or ScreenCaptureKit. It works via a Unix socket at `/tmp/egui-mcp.sock`.
 
-**One-time setup** (already done — do not repeat):
-- `/Applications/DJSimulator.app` exists with bundle ID `com.tcnet.djsimulator`
-- It was registered with LaunchServices and ad-hoc signed
+### How it works
 
-**Each dev iteration** — use `make run-simulator` instead of `cargo run`:
+Each frame, the eframe app captures the egui AccessKit tree via an egui `Plugin::output_hook` (which fires after `end_pass()` sets `platform_output.accesskit_update`), converts it to our `UiTree` type, and stores it in the `McpClient`. The `IpcServer` (running on a background thread) handles `GetUiTree` requests from the `egui-mcp-server` process. The server process is started by Claude Code via `.mcp.json`.
+
+**Key insight:** Reading `ctx.output().accesskit_update` inside `App::update()` always returns `None` — the tree is only built by egui's internal `end_pass()`, which runs *after* `update()` returns. Use `Plugin::output_hook` instead.
+
+### Wiring egui-mcp into an eframe app
+
+1. **Cargo deps** — add to the app's feature in `Cargo.toml`:
+   ```toml
+   "dep:egui-mcp-client", "dep:egui-mcp-protocol", "egui/accesskit", "dep:accesskit"
+   ```
+   The `[patch.crates-io]` block already redirects these to `local_crates/`.
+
+2. **Binary entry point** — in `src/bin/<app>.rs`:
+   ```rust
+   use egui_mcp_client::{IpcServer, McpClient};
+
+   let mcp_client = McpClient::new();
+   let mcp_client_for_ipc = mcp_client.clone();
+   let ipc_rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+   ipc_rt.spawn(async move {
+       if let Err(e) = IpcServer::run(mcp_client_for_ipc).await {
+           eprintln!("egui-mcp IPC error: {e}");
+       }
+   });
+   // Pass mcp_client + ipc_rt to the App struct
+   ```
+
+3. **App struct** — add these fields:
+   ```rust
+   mcp_client: McpClient,
+   rt: tokio::runtime::Runtime,          // tokio rt for block_on calls
+   pending_tree: Arc<Mutex<Option<UiTree>>>,
+   plugin_registered: bool,
+   ```
+
+4. **Plugin** — define once (e.g. at top of `app.rs`):
+   ```rust
+   struct AccessKitCapturePlugin { pending: Arc<Mutex<Option<UiTree>>> }
+
+   impl egui::Plugin for AccessKitCapturePlugin {
+       fn debug_name(&self) -> &'static str { "AccessKitCapture" }
+       fn output_hook(&mut self, output: &mut egui::FullOutput) {
+           if let Some(tree) = &output.platform_output.accesskit_update {
+               if let Ok(mut g) = self.pending.lock() {
+                   *g = Some(crate::<module>::accesskit_tree::convert(tree));
+               }
+           }
+       }
+   }
+   ```
+   See `src/simulator/accesskit_tree.rs` for the `convert()` implementation.
+
+5. **`App::update()` — top of the function:**
+   ```rust
+   if !self.plugin_registered {
+       ctx.add_plugin(AccessKitCapturePlugin { pending: self.pending_tree.clone() });
+       self.plugin_registered = true;
+   }
+   if let Ok(mut g) = self.pending_tree.lock() {
+       if let Some(tree) = g.take() {
+           let _ = self.rt.block_on(self.mcp_client.set_ui_tree(tree));
+       }
+   }
+   ```
+
+6. **Widget accessibility** — `find_by_label` only works if widgets register info. Standard egui widgets (`ui.button(...)`, `ui.add(Slider...)`, etc.) do this automatically. For custom `allocate_rect`-based widgets, add:
+   ```rust
+   let resp = ui.allocate_rect(rect, Sense::click());
+   resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "MY LABEL"));
+   // or for sliders:
+   resp.widget_info(|| egui::WidgetInfo::slider(true, value as f64, "MY SLIDER"));
+   ```
+
+### Running and verifying
+
+Start the app as a plain binary (no `.app` bundle needed):
 ```bash
-make run-simulator            # builds, copies binary into .app, relaunches
-# Override defaults:
-make run-simulator BIND_IP=192.168.1.100 USB_DIR=~/Music
+RUST_LOG=warn ./target/debug/<binary> --bind-ip 127.0.0.1 &
 ```
 
-**Each Claude Code session** — at the start of any session involving the simulator, call:
+Then verify:
 ```
-request_access(apps=["DJSimulator"])   # grants com.tcnet.djsimulator
+mcp__egui-mcp__ping                              → pong
+mcp__egui-mcp__check_connection                  → connected
+mcp__egui-mcp__get_ui_tree                       → full widget tree JSON
+mcp__egui-mcp__find_by_label {"pattern": "X"}   → elements with matching label
+mcp__egui-mcp__click_element {"id": "<id>"}      → click at element center
+mcp__egui-mcp__take_screenshot                   → PNG of app window
 ```
-No Claude restart is needed after this — the bundle ID is stable and permanently installed.
 
-**Implementation files:**
-- `src/bin/simulator.rs` — creates `McpClient`, spawns `IpcServer` thread, enables AccessKit via `cc.egui_ctx.enable_accesskit()`
-- `src/simulator/app.rs` — egui `update` loop, UI layout
+The `.mcp.json` is already configured to use `local_crates/egui-mcp-server/target/debug/egui-mcp-server`.
 
-**Note:** egui-mcp (`mcp__egui-mcp__*` tools) does not work on macOS (requires Linux AT-SPI). Use computer-use instead.
+### Simulator-specific commands
+
+```bash
+make run-simulator-mcp   # build + kill old + start ./target/debug/simulator in bg
+make stop-simulator      # kill running instance
+make run-simulator       # .app bundle variant (for computer-use / ScreenCaptureKit)
+
+**Each dev iteration:**
+```bash
+make run-simulator   # builds, copies binary into .app, relaunches
+```
 
 ## Architecture
 
