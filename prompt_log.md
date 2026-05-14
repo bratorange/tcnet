@@ -144,3 +144,4 @@ However when I opened the viewer first and the dj link second, the connection se
 - im not sure whether it works on macos. if not, create a podman container with gui env inside it
   so that ai agents can use that in the future
 - verify that that the mcp server works by using it to access the guis and interacting with them
+- currently the viewer freeze in its last preview mode even if the node is not connected anymore. fix that.

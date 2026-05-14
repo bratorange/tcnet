@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "egui-mcp": {
+      "command": "egui-mcp-server",
+      "args": ["serve"],
+      "env": { "EGUI_MCP_APP_NAME": "CDJ Simulator" }
+    }
+  }
+}

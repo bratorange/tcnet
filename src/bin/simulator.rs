@@ -1,10 +1,13 @@
 use clap::Parser;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use tcnet::simulator::app::SimulatorApp;
 use tcnet::simulator::audio::AudioEngine;
+use tcnet::simulator::mcp::SimBridge;
 use tcnet::simulator::virtual_usb::VirtualUsb;
 use tcnet::{ApplicationConfig, NodeType, TCNetClient};
+use egui_mcp_client::{IpcServer, McpClient};
 
 #[derive(Parser)]
 #[command(name = "simulator", about = "DJ Deck simulator")]
@@ -16,6 +19,10 @@ struct Args {
     /// Folder to use as the virtual USB stick (scanned for audio files)
     #[arg(long, default_value = ".")]
     usb_dir: PathBuf,
+
+    /// Enable MCP stdio server for remote control
+    #[arg(long)]
+    mcp: bool,
 }
 
 fn main() {
@@ -30,7 +37,64 @@ fn main() {
 
     let usb = VirtualUsb::from_dir(args.usb_dir);
     let audio = AudioEngine::new();
-    let app = SimulatorApp::new(active_node, usb, audio);
+
+    let bridge: Option<Arc<Mutex<SimBridge>>> = if args.mcp {
+        let bridge = Arc::new(Mutex::new(SimBridge::default()));
+
+        #[cfg(feature = "mcp")]
+        {
+            let bridge_clone = Arc::clone(&bridge);
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("tokio runtime");
+                rt.block_on(async move {
+                    use rmcp::ServiceExt;
+                    use tcnet::simulator::mcp::server::SimMcpServer;
+                    let server = SimMcpServer::new(bridge_clone);
+                    let transport = rmcp::transport::io::stdio();
+                    match server.serve(transport).await {
+                        Ok(running) => {
+                            let _ = running.waiting().await;
+                        }
+                        Err(e) => {
+                            eprintln!("MCP server init error: {e}");
+                        }
+                    }
+                });
+            });
+        }
+        #[cfg(not(feature = "mcp"))]
+        {
+            eprintln!("--mcp flag requires the 'mcp' feature to be enabled at compile time");
+        }
+
+        Some(bridge)
+    } else {
+        None
+    };
+
+    // Set up egui-mcp-client: IPC server for screenshot + input injection
+    let mcp_client = McpClient::new();
+    let mcp_client_for_ipc = mcp_client.clone();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("egui-mcp tokio runtime");
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("egui-mcp ipc tokio runtime");
+        rt.block_on(async move {
+            if let Err(e) = IpcServer::run(mcp_client_for_ipc).await {
+                eprintln!("egui-mcp IPC server error: {e}");
+            }
+        });
+    });
+
+    let app = SimulatorApp::new(active_node, usb, audio, bridge, mcp_client, rt);
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -43,9 +107,11 @@ fn main() {
     eframe::run_native(
         "CDJ Simulator",
         options,
-        Box::new(move |_cc| Ok(Box::new(app))),
+        Box::new(move |cc| {
+            cc.egui_ctx.enable_accesskit();
+            Ok(Box::new(app))
+        }),
     ).expect("Failed to start eframe");
 
-    // Keep TCNetClient alive for the duration of the app
     drop(client);
 }

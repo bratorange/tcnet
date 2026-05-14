@@ -23,8 +23,14 @@ path = "src/bin/viewer.rs"
 required-features = ["viewer"]
 
 [features]
-simulator = ["dep:eframe", "dep:egui", "dep:rodio", "dep:lofty"]
+simulator = ["dep:eframe", "dep:egui", "dep:rodio", "dep:lofty", "dep:egui-mcp-client", "dep:image"]
 viewer = ["dep:eframe", "dep:egui"]
+mcp = ["dep:rmcp", "dep:serde_json"]
+
+[[bin]]
+name = "mcp_viewer"
+path = "src/bin/mcp_viewer.rs"
+required-features = ["mcp"]
 
 [dependencies]
 bitflags = "2.11.0"
@@ -36,10 +42,14 @@ clap = { version = "4.5.60", features = ["derive"] }
 getifs = "0.4.0"
 kanal = "0.1.1"
 triple_buffer = "9"
-eframe = { version = "0.31", optional = true, features = ["wgpu"] }
-egui = { version = "0.31", optional = true }
+eframe = { version = "0.33", optional = true, features = ["wgpu"] }
+egui = { version = "0.33", optional = true }
+egui-mcp-client = { version = "0.0.5", optional = true }
+image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
 rodio = { version = "0.20", optional = true, features = ["symphonia-all"] }
 lofty = { version = "0.22", optional = true }
+rmcp = { version = "1", features = ["server", "transport-io"], optional = true }
+serde_json = { version = "1", optional = true }
 
 [dev-dependencies]
 serial_test = "3"

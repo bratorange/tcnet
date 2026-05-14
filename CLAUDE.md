@@ -11,7 +11,38 @@ cargo run -- <bind_ip>        # run (bind_ip is a required CLI arg, e.g. 192.168
 cargo test                    # run tests
 cargo clippy                  # lint
 cargo fmt                     # format
+
+# Build + launch simulator via the .app wrapper (required for computer-use)
+make run-simulator            # builds, copies binary, relaunches /Applications/DJSimulator.app
+make stop-simulator           # kill the running instance
 ```
+
+## GUI Verification Workflow (computer-use)
+
+The simulator runs as a proper macOS `.app` bundle so that Claude Code's `computer-use` MCP can grant it screen-capture access via ScreenCaptureKit.
+
+**One-time setup** (already done — do not repeat):
+- `/Applications/DJSimulator.app` exists with bundle ID `com.tcnet.djsimulator`
+- It was registered with LaunchServices and ad-hoc signed
+
+**Each dev iteration** — use `make run-simulator` instead of `cargo run`:
+```bash
+make run-simulator            # builds, copies binary into .app, relaunches
+# Override defaults:
+make run-simulator BIND_IP=192.168.1.100 USB_DIR=~/Music
+```
+
+**Each Claude Code session** — at the start of any session involving the simulator, call:
+```
+request_access(apps=["DJSimulator"])   # grants com.tcnet.djsimulator
+```
+No Claude restart is needed after this — the bundle ID is stable and permanently installed.
+
+**Implementation files:**
+- `src/bin/simulator.rs` — creates `McpClient`, spawns `IpcServer` thread, enables AccessKit via `cc.egui_ctx.enable_accesskit()`
+- `src/simulator/app.rs` — egui `update` loop, UI layout
+
+**Note:** egui-mcp (`mcp__egui-mcp__*` tools) does not work on macOS (requires Linux AT-SPI). Use computer-use instead.
 
 ## Architecture
 

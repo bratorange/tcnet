@@ -11,7 +11,7 @@ const LANE_H: f32 = 130.0;
 
 enum AppState {
     Waiting { client: TCNetClient },
-    Viewing { _client: TCNetClient, view: DjControllerView, cache: WaveformCache },
+    Viewing { client: TCNetClient, view: DjControllerView, cache: WaveformCache },
 }
 
 pub struct ViewerApp {
@@ -34,7 +34,7 @@ impl eframe::App for ViewerApp {
                 match client.get_any_controller_view() {
                     Some(view) => {
                         self.state = Some(AppState::Viewing {
-                            _client: client,
+                            client,
                             view,
                             cache: WaveformCache::new(),
                         });
@@ -42,6 +42,18 @@ impl eframe::App for ViewerApp {
                     None => {
                         self.state = Some(AppState::Waiting { client });
                     }
+                }
+            }
+        }
+
+        // Viewing → Waiting: transition back when controller disconnects
+        if matches!(self.state, Some(AppState::Viewing { .. })) {
+            let connected = if let Some(AppState::Viewing { ref mut client, .. }) = self.state {
+                client.active_nodes().iter().any(|n| n.has_dj_controller)
+            } else { false };
+            if !connected {
+                if let Some(AppState::Viewing { client, .. }) = self.state.take() {
+                    self.state = Some(AppState::Waiting { client });
                 }
             }
         }
