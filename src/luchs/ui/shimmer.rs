@@ -1,4 +1,4 @@
-use egui::{Color32, Rect, Sense, Stroke, Ui, Vec2};
+use egui::{Color32, Rect, Sense, Stroke, Ui};
 
 const STRIPE_W: f32 = 6.0;
 const SHIMMER_SPEED: f32 = 18.0; // pixels per second

@@ -1,7 +1,5 @@
 use egui::{Color32, Sense, Stroke, Ui, Vec2};
-
-use crate::luchs::phrase_types::{Phrase, Segment};
-
+use crate::luchs::phrase_types::Segment;
 use super::shimmer;
 
 const MIN_LABEL_W: f32 = 22.0;

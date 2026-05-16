@@ -85,15 +85,15 @@ pub fn show(ui: &mut Ui, deck: &DeckState, height: f32) {
     //   phrase strip (phrase_canvas, 14px)
     let phrase_strip_h = 14.0_f32.min(canvas.height() * 0.24);
     let mp_strip_h = 6.0_f32.min(canvas.height() * 0.12);
-    let wave_canvas = egui::Rect::from_min_max(
+    let wave_canvas = Rect::from_min_max(
         canvas.left_top(),
         egui::pos2(canvas.right(), canvas.bottom() - phrase_strip_h - mp_strip_h),
     );
-    let mp_canvas = egui::Rect::from_min_max(
+    let mp_canvas = Rect::from_min_max(
         egui::pos2(canvas.left(), canvas.bottom() - phrase_strip_h - mp_strip_h),
         egui::pos2(canvas.right(), canvas.bottom() - phrase_strip_h),
     );
-    let phrase_canvas = egui::Rect::from_min_max(
+    let phrase_canvas = Rect::from_min_max(
         egui::pos2(canvas.left(), canvas.bottom() - phrase_strip_h),
         canvas.right_bottom(),
     );
@@ -463,7 +463,7 @@ fn draw_bar_numbers(
     let label_color = Color32::from_rgba_unmultiplied(0xDD, 0xDD, 0xE6, alpha);
     let shadow_color = Color32::from_rgba_unmultiplied(0x00, 0x00, 0x00, alpha.saturating_mul(180) / 255);
 
-    let mut draw_bar = |x: f32, bar_n: u32| {
+    let draw_bar = |x: f32, bar_n: u32| {
         // Subtle shadow improves legibility over the waveform.
         painter.text(
             egui::pos2(x + 3.0, canvas.top() + 5.0),

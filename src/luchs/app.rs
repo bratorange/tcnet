@@ -145,29 +145,6 @@ impl LuchsApp {
 }
 
 impl eframe::App for LuchsApp {
-    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
-        let inputs = self.rt.block_on(self.mcp_client.take_pending_inputs());
-        egui_mcp_client::inject_inputs(ctx, raw_input, inputs);
-
-        for event in &raw_input.events {
-            if let egui::Event::Screenshot { image, .. } = event {
-                let w = image.width() as u32;
-                let h = image.height() as u32;
-                let rgba_bytes: Vec<u8> = image
-                    .pixels
-                    .iter()
-                    .flat_map(|c| [c.r(), c.g(), c.b(), c.a()])
-                    .collect();
-                if let Some(img) = ImageBuffer::<Rgba<u8>, _>::from_raw(w, h, rgba_bytes) {
-                    let mut png = Vec::new();
-                    let _ = img.write_to(&mut std::io::Cursor::new(&mut png), ImageFormat::Png);
-                    let client = self.mcp_client.clone();
-                    self.rt.block_on(client.set_screenshot(png));
-                }
-            }
-        }
-    }
-
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.request_repaint_after(std::time::Duration::from_millis(33));
 
@@ -262,6 +239,30 @@ impl eframe::App for LuchsApp {
         let highlights = self.rt.block_on(self.mcp_client.get_highlights());
         egui_mcp_client::draw_highlights(ctx, &highlights);
         let _ = self.rt.block_on(self.mcp_client.record_frame_auto());
+    }
+}
+impl LuchsApp{
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        let inputs = self.rt.block_on(self.mcp_client.take_pending_inputs());
+        egui_mcp_client::inject_inputs(ctx, raw_input, inputs);
+
+        for event in &raw_input.events {
+            if let egui::Event::Screenshot { image, .. } = event {
+                let w = image.width() as u32;
+                let h = image.height() as u32;
+                let rgba_bytes: Vec<u8> = image
+                    .pixels
+                    .iter()
+                    .flat_map(|c| [c.r(), c.g(), c.b(), c.a()])
+                    .collect();
+                if let Some(img) = ImageBuffer::<Rgba<u8>, _>::from_raw(w, h, rgba_bytes) {
+                    let mut png = Vec::new();
+                    let _ = img.write_to(&mut std::io::Cursor::new(&mut png), ImageFormat::Png);
+                    let client = self.mcp_client.clone();
+                    self.rt.block_on(client.set_screenshot(png));
+                }
+            }
+        }
     }
 }
 

@@ -3,7 +3,7 @@ use crate::node::tcnet_packet_serde::{AsciiString, NodeId, NodeOptions, NodeType
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddrV4};
 pub(crate) mod dj_controller;
-pub(crate) mod tcnet_packet_serde;
+pub mod tcnet_packet_serde;
 pub(crate) mod tcnet_packet;
 pub mod dispatcher;
 pub(crate) mod response_data;

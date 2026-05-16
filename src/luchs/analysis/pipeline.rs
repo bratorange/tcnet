@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use log::info;
 use crate::luchs::phrase_types::{MpCurve, PitchContour, Segment};
 
 use super::allin1;
@@ -51,7 +50,6 @@ struct Job {
 }
 
 pub struct AnalysisManager {
-    event_tx: kanal::Sender<AnalysisEvent>,
     event_rx: kanal::Receiver<AnalysisEvent>,
     job_tx: kanal::Sender<Job>,
     allin1_script: PathBuf,
@@ -85,7 +83,6 @@ impl AnalysisManager {
         }
 
         Self {
-            event_tx,
             event_rx,
             job_tx,
             allin1_script,

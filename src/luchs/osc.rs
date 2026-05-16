@@ -1,9 +1,7 @@
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::{Arc, Mutex};
-
 use rosc::{OscMessage, OscPacket, OscType};
 
-use super::phrase_types::Phrase;
 
 #[derive(Debug, Clone)]
 pub enum OscEvent {

@@ -1,10 +1,11 @@
 use clap::Parser;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::PathBuf;
 
 use egui_mcp_client::{IpcServer, McpClient};
 use tcnet::luchs::app::LuchsApp;
-use tcnet::{ApplicationConfig, NodeType, TCNetClient};
+use tcnet::{into_ascii, ApplicationConfig, NodeType, TCNetClient};
+use tcnet::node::tcnet_packet_serde::NodeOptions;
 
 #[derive(Parser)]
 #[command(name = "luchs", about = "LUCHS — VJ phrase-annotator over TCNet")]
@@ -22,8 +23,19 @@ fn main() {
     env_logger::init();
     let args = Args::parse();
 
-    let mut node_config = ApplicationConfig::default();
-    node_config.node_type = NodeType::Slave;
+    let mut node_config = ApplicationConfig {
+        node_id: 0,
+        node_type: NodeType::Slave,
+        vendor_name: into_ascii!("Bratorange      "),
+        application_name: into_ascii!("LUCHS           "),
+        application_major_version: 0,
+        application_minor_version: 0,
+        application_bug_version: 102,
+        node_name: into_ascii!("LUCHS   "),
+        node_options: NodeOptions::empty(),
+        address: SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 65_023),
+    };
+    
     node_config.address.set_ip(args.bind_ip);
     let client = TCNetClient::new(node_config);
 

@@ -121,7 +121,7 @@ fn read_track_info(path: PathBuf) -> Option<TrackInfo> {
             let title = tag.title().map(|s| s.to_string()).unwrap_or_else(|| stem.clone());
             let artist = tag.artist().map(|s| s.to_string()).unwrap_or_default();
             let bpm = tag
-                .get_string(&lofty::tag::ItemKey::Bpm)
+                .get_string(&ItemKey::Bpm)
                 .and_then(|s| s.parse::<f32>().ok());
             (title, artist, bpm)
         } else {

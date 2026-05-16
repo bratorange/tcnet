@@ -219,7 +219,7 @@ pub mod server {
                     Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
                 }
 
-                other => Err(McpError::method_not_found::<rmcp::model::CallToolRequestMethod>()),
+                _ => Err(McpError::method_not_found::<rmcp::model::CallToolRequestMethod>()),
             }
         }
     }

@@ -18,7 +18,6 @@ use crate::node::tcnet_packet::{management_header, node_config_from_opt_in, opt_
 use crate::node::tcnet_packet::Data::{OptIn, OptOut};
 use crate::node::tcnet_packet::Data;
 use crate::node::tcnet_packet_serde::{
-    ArtworkFileData, BigWaveformData, BeatGridEntry, BeatGridHeader,
     LayerId, NodeType, RequestDataType,
 };
 use crate::ForeignNodeInfo;
@@ -496,50 +495,6 @@ async fn active_broadcast(
 
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-}
-
-/// Splits a byte slice into chunks of `cluster_size` and builds multi-packet Data variants.
-pub(crate) fn build_big_waveform_packets(layer_id: u8, data: &[u8]) -> Vec<Data> {
-    const CLUSTER: usize = 4400;
-    let total = data.len() as u32;
-    let n_packets = data.chunks(CLUSTER).count() as u32;
-    data.chunks(CLUSTER)
-        .enumerate()
-        .map(|(i, chunk)| Data::BigWaveform(BigWaveformData::new_packet(
-            layer_id, total, n_packets, i as u32, chunk.to_vec())))
-        .collect()
-}
-
-pub(crate) fn build_artwork_packets(layer_id: u8, jpeg: &[u8]) -> Vec<Data> {
-    const CLUSTER: usize = 4400;
-    let total = jpeg.len() as u32;
-    let n_packets = jpeg.chunks(CLUSTER).count().max(1) as u32;
-    if jpeg.is_empty() {
-        return vec![Data::ArtworkFile(ArtworkFileData::new_packet(layer_id, 0, 1, 0, vec![]))];
-    }
-    jpeg.chunks(CLUSTER)
-        .enumerate()
-        .map(|(i, chunk)| Data::ArtworkFile(ArtworkFileData::new_packet(
-            layer_id, total, n_packets, i as u32, chunk.to_vec())))
-        .collect()
-}
-
-pub(crate) fn build_beat_grid_packets(layer_id: u8, entries: &[BeatGridEntry]) -> Vec<Data> {
-    use deku::DekuContainerWrite;
-    const CLUSTER: usize = 2400; // bytes
-    let raw: Vec<u8> = entries.iter()
-        .flat_map(|e| e.to_bytes().unwrap_or_default())
-        .collect();
-    let total = raw.len() as u32;
-    let n_packets = raw.chunks(CLUSTER).count().max(1) as u32;
-    if raw.is_empty() {
-        return vec![Data::BeatGrid(BeatGridHeader::new_packet(layer_id, 0, 1, 0, vec![]))];
-    }
-    raw.chunks(CLUSTER)
-        .enumerate()
-        .map(|(i, chunk)| Data::BeatGrid(BeatGridHeader::new_packet(
-            layer_id, total, n_packets, i as u32, chunk.to_vec())))
-        .collect()
 }
 
 pub fn timestamp_micros() -> u32 {
