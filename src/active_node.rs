@@ -482,7 +482,7 @@ impl ActiveDJNode {
                 loop {
                     let ts = (beat as f32 * beat_interval_ms) as u32;
                     if ts > info.duration_ms { break; }
-                    let beat_type = if beat % 4 == 0 { 20u8 } else { 10u8 };
+                    let beat_type = if beat.is_multiple_of(4) { 20u8 } else { 10u8 };
                     entries.push(BeatGridEntry::new(beat as u16 + 1, beat_type, ts));
                     beat += 1;
                 }

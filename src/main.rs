@@ -70,12 +70,11 @@ fn main() {
             println!("  {} | has_dj_controller={}", n.address, n.has_dj_controller);
         }
 
-        if let Some(node) = nodes.iter().find(|n| n.has_dj_controller) {
-            if let Some(view) = client.get_controller_view(node.address) {
+        if let Some(node) = nodes.iter().find(|n| n.has_dj_controller)
+            && let Some(view) = client.get_controller_view(node.address) {
                 println!("Got DjControllerView for {}\n", node.address);
                 break view;
             }
-        }
     };
 
     loop {

@@ -133,11 +133,10 @@ impl TCNetClient {
         self._runtime.block_on(async {
             let mut state = self.dispatcher.state.write().await;
             for node in state.discovered_nodes.values_mut() {
-                if let Some(ctrl) = node.dj_controller.as_mut() {
-                    if let Some(buf) = ctrl.buf_output.take() {
+                if let Some(ctrl) = node.dj_controller.as_mut()
+                    && let Some(buf) = ctrl.buf_output.take() {
                         return Some(DjControllerView::new(buf, ctrl.request_tx.clone()));
                     }
-                }
             }
             None
         })
