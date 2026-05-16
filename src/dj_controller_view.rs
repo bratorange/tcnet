@@ -1,6 +1,58 @@
 use tokio::sync::oneshot;
 use crate::node::dj_controller::{DjControllerState, LayerSnapshot, MixerSnapshot, TimeoutError, UserRequest};
-use crate::node::tcnet_packet_serde::{ArtworkFileData, BigWaveformData, LayerId, SmallWaveformData};
+use crate::node::tcnet_packet_serde::{ArtworkFileData, BeatGridHeader, BigWaveformData, LayerId, SmallWaveformData};
+
+/// A lightweight, clonable handle that can be sent to background threads to issue
+/// waveform requests without needing exclusive access to `DjControllerView`.
+pub struct WaveformRequester {
+    pub(crate) request_tx: kanal::Sender<UserRequest>,
+}
+
+impl Clone for WaveformRequester {
+    fn clone(&self) -> Self {
+        Self { request_tx: self.request_tx.clone() }
+    }
+}
+
+const _: fn() = || {
+    fn _assert_send<T: Send>() {}
+    _assert_send::<WaveformRequester>();
+};
+
+impl WaveformRequester {
+    pub async fn request_small_waveform(
+        &self,
+        layer: LayerId,
+    ) -> Result<SmallWaveformData, TimeoutError> {
+        let (tx, rx) = oneshot::channel();
+        self.request_tx
+            .send(UserRequest::SmallWaveform { layer, reply: tx })
+            .map_err(|_| TimeoutError)?;
+        rx.await.map_err(|_| TimeoutError)?
+    }
+
+    pub async fn request_big_waveform(
+        &self,
+        layer: LayerId,
+    ) -> Result<BigWaveformData, TimeoutError> {
+        let (tx, rx) = oneshot::channel();
+        self.request_tx
+            .send(UserRequest::BigWaveform { layer, reply: tx })
+            .map_err(|_| TimeoutError)?;
+        rx.await.map_err(|_| TimeoutError)?
+    }
+
+    pub async fn request_beat_grid(
+        &self,
+        layer: LayerId,
+    ) -> Result<BeatGridHeader, TimeoutError> {
+        let (tx, rx) = oneshot::channel();
+        self.request_tx
+            .send(UserRequest::BeatGrid { layer, reply: tx })
+            .map_err(|_| TimeoutError)?;
+        rx.await.map_err(|_| TimeoutError)?
+    }
+}
 
 /// User-facing read-only view of a discovered foreign DJ controller node.
 ///
@@ -52,6 +104,25 @@ impl DjControllerView {
             .send(UserRequest::BigWaveform { layer, reply: tx })
             .map_err(|_| TimeoutError)?;
         rx.await.map_err(|_| TimeoutError)?
+    }
+
+    /// Request BeatGrid data for a layer. Times out after 5 seconds. Only the
+    /// first BeatGrid packet is returned; multi-packet reassembly is not yet
+    /// implemented.
+    pub async fn request_beat_grid(
+        &self,
+        layer: LayerId,
+    ) -> Result<BeatGridHeader, TimeoutError> {
+        let (tx, rx) = oneshot::channel();
+        self.request_tx
+            .send(UserRequest::BeatGrid { layer, reply: tx })
+            .map_err(|_| TimeoutError)?;
+        rx.await.map_err(|_| TimeoutError)?
+    }
+
+    /// Returns a clonable handle for issuing waveform requests from background threads.
+    pub fn waveform_requester(&self) -> WaveformRequester {
+        WaveformRequester { request_tx: self.request_tx.clone() }
     }
 
     /// Request ArtworkFile data for a layer. Times out after 5 seconds.

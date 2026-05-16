@@ -6,16 +6,17 @@
 //!   cargo test -- --test-threads=1 --nocapture
 //! (single-threaded because the client binds fixed ports 60000-60002 + 65023)
 
-use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+use serial_test::serial;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::thread::sleep;
 use std::time::Duration;
 use deku::DekuContainerWrite;
-
+use log::trace;
 use crate::node::tcnet_packet::management_header;
 use crate::node::tcnet_packet_serde::{
     AutoMasterMode, LayerId, LayerState, LayerStatus, LayerTimecode,
     MetricsData, MixerChannel, MixerData, NodeOptions, NodeType, OptInData,
-    StatusData, TimePacketData,
+    RequestData, RequestDataType, StatusData, TimePacketData,
 };
 use crate::{ApplicationConfig, TCNetClient};
 use crate::into_ascii;
@@ -50,7 +51,7 @@ fn fake_config() -> ApplicationConfig {
         application_bug_version: 0,
         node_name: into_ascii!("CDJ-3000"),
         node_options: NodeOptions::empty(),
-        unicast_port: 65_023,
+        address: SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 60_023),
     }
 }
 
@@ -63,7 +64,7 @@ fn opt_in_bytes(config: &ApplicationConfig, seq: u8) -> (Vec<u8>, Vec<u8>) {
     let header = management_header(config, 2, seq);
     let data = OptInData {
         node_count: 1,
-        node_listener_port: config.unicast_port,
+        node_listener_port: config.address.port(),
         uptime: 0,
         _reserved0: Default::default(),
         vendor_name: config.vendor_name,
@@ -89,7 +90,7 @@ fn status_bytes(config: &ApplicationConfig, seq: u8) -> (Vec<u8>, Vec<u8>) {
 
     let data = StatusData {
         node_count: 1,
-        node_listener_port: config.unicast_port,
+        node_listener_port: config.address.port(),
         _reserved0: [0u8; 6],
         layer_1_source: 1,
         layer_2_source: 2,
@@ -307,13 +308,13 @@ fn mixer_bytes(config: &ApplicationConfig, seq: u8) -> (Vec<u8>, Vec<u8>) {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[serial]
 fn test_cdj_play_session() {
     let _ = env_logger::try_init();
-
-    let client_addr = Ipv4Addr::new(127, 0, 0, 1);
     let dest: SocketAddr = "127.0.0.1:60000".parse().unwrap();
 
-    let client = TCNetClient::new(client_addr, ApplicationConfig::default());
+    let config = ApplicationConfig::default();
+    let client = TCNetClient::new(config);
     // Give the tokio runtime time to bind all listening sockets before sending.
     sleep(Duration::from_millis(500));
 
@@ -345,8 +346,12 @@ fn test_cdj_play_session() {
     // Allow the dj_controller_task to drain packets and write to triple buffer
     sleep(Duration::from_millis(200));
 
+    client._runtime.block_on(async {
+        let state = client.dispatcher.state.write().await;
+        trace!("The following nodes were discovered {:?}", state.discovered_nodes);
+    });
     let mut view = client
-        .get_controller_view(client_addr)
+        .get_any_controller_view()
         .expect("DjControllerView not available — no DJ packets received?");
 
     // Give dj_controller_task time to drain the forwarded packets and write state.
@@ -393,4 +398,285 @@ fn test_cdj_play_session() {
         assert_eq!(mixer.channels[1].fader_level, CH2_FADER, "ch2 fader");
         assert_eq!(mixer.mixer_id, 1, "mixer_id");
     }
+}
+
+// ---------------------------------------------------------------------------
+// REQUEST / response round-trip test
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn test_request_response() {
+    use crate::active_node::TrackMeta;
+    use crate::node::tcnet_packet::Packet;
+
+    let _ = env_logger::try_init();
+
+    // Start a Master-type TCNetClient on 127.0.0.1.
+    let mut node_config = ApplicationConfig::default();
+    node_config.node_type = NodeType::Master;
+    let client = TCNetClient::new(node_config);
+    sleep(Duration::from_millis(400));
+
+    // Load a track so all response_data slots are populated.
+    let mut node = client.create_active_node();
+    node.load_track(LayerId::L1, TrackMeta {
+        title: "Test Track".into(),
+        artist: "Test Artist".into(),
+        duration_ms: 60_000,
+        bpm: 120.0,
+        track_id: 1,
+    }).expect("load_track failed");
+    // Trigger mixer data so last_mixer is populated.
+    node.set_master_fader(200).ok();
+    sleep(Duration::from_millis(150));
+
+    // Bind the "viewer" socket and register it with the dispatcher via OptIn.
+    let viewer = UdpSocket::bind("127.0.0.1:0").expect("bind viewer");
+    viewer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    let viewer_port = viewer.local_addr().unwrap().port();
+
+    let dest: SocketAddr = "127.0.0.1:60000".parse().unwrap();
+    let viewer_cfg = ApplicationConfig {
+        node_type: NodeType::Slave,
+        address: SocketAddrV4::new(Ipv4Addr::LOCALHOST, viewer_port),
+        ..node_config
+    };
+    let (h, d) = opt_in_bytes(&viewer_cfg, 200);
+    send_packet(&viewer, dest, h, d);
+    sleep(Duration::from_millis(150));
+
+    // Receive REQUEST-response packets, skipping proactive broadcasts (OptIn/OptOut/Time/Status).
+    let recv_packets = |expected: usize| -> Vec<crate::node::tcnet_packet::Data> {
+        use crate::node::tcnet_packet::Data as D;
+        let mut collected = Vec::new();
+        let mut buf = [0u8; 8192];
+        loop {
+            match viewer.recv_from(&mut buf) {
+                Ok((size, _)) => {
+                    if let Ok(pkt) = Packet::deserialize_packet(&buf[..size]) {
+                        match pkt.data {
+                            D::OptIn(_) | D::OptOut(_) | D::Time(_) | D::Status(_) => {}
+                            data => {
+                                collected.push(data);
+                                if collected.len() >= expected { break; }
+                            }
+                        }
+                    }
+                }
+                Err(_) => break, // read timeout
+            }
+        }
+        collected
+    };
+
+    let send_req = |data_type: RequestDataType| {
+        let header = management_header(&viewer_cfg, 20, 201);
+        let req = RequestData { data_type, layer: LayerId::L1 };
+        let payload = [header.to_bytes().unwrap(), req.to_bytes().unwrap()].concat();
+        viewer.send_to(&payload, dest).expect("send request");
+    };
+
+    // MetricsData
+    send_req(RequestDataType::MetricsData);
+    let pkts = recv_packets(1);
+    assert!(matches!(pkts.first(), Some(crate::node::tcnet_packet::Data::Metrics(_))),
+        "MetricsData response: {:?}", pkts);
+
+    // MetaData
+    send_req(RequestDataType::MetaData);
+    let pkts = recv_packets(1);
+    assert!(matches!(pkts.first(), Some(crate::node::tcnet_packet::Data::Meta(_))),
+        "MetaData response: {:?}", pkts);
+
+    // BeatGridData
+    send_req(RequestDataType::BeatGridData);
+    let pkts = recv_packets(1);
+    assert!(matches!(pkts.first(), Some(crate::node::tcnet_packet::Data::BeatGrid(_))),
+        "BeatGridData response: {:?}", pkts);
+
+    // CueData
+    send_req(RequestDataType::CueData);
+    let pkts = recv_packets(1);
+    assert!(matches!(pkts.first(), Some(crate::node::tcnet_packet::Data::Cue(_))),
+        "CueData response: {:?}", pkts);
+
+    // SmallWaveformData
+    send_req(RequestDataType::SmallWaveformData);
+    let pkts = recv_packets(1);
+    assert!(matches!(pkts.first(), Some(crate::node::tcnet_packet::Data::SmallWaveform(_))),
+        "SmallWaveformData response: {:?}", pkts);
+
+    // LargeWaveformData
+    send_req(RequestDataType::LargeWaveformData);
+    let pkts = recv_packets(1);
+    assert!(matches!(pkts.first(), Some(crate::node::tcnet_packet::Data::BigWaveform(_))),
+        "LargeWaveformData response: {:?}", pkts);
+
+    // LowResArtworkFile (empty placeholder)
+    send_req(RequestDataType::LowResArtworkFile);
+    let pkts = recv_packets(1);
+    assert!(matches!(pkts.first(), Some(crate::node::tcnet_packet::Data::ArtworkFile(_))),
+        "LowResArtworkFile response: {:?}", pkts);
+
+    // MixerData
+    send_req(RequestDataType::MixerData);
+    let pkts = recv_packets(1);
+    assert!(matches!(pkts.first(), Some(crate::node::tcnet_packet::Data::Mixer(_))),
+        "MixerData response: {:?}", pkts);
+}
+
+// ---------------------------------------------------------------------------
+// Waveform routing regression test
+// ---------------------------------------------------------------------------
+// Verifies two properties of the routing fix:
+// 1. SmallWaveform responses are sent from port 60000 (broadcast_socket), not 65023.
+// 2. A REQUEST arriving from a different source port than the OptIn registration
+//    is still routed to the correct discovered node address (IP-based fallback).
+//
+// Uses raw sockets instead of a second TCNetClient to avoid the port-60000
+// conflict that prevents two in-process clients from doing broadcast discovery.
+
+#[test]
+#[serial]
+fn test_waveform_routing() {
+    use crate::active_node::TrackMeta;
+    use crate::node::tcnet_packet::Packet;
+
+    let _ = env_logger::try_init();
+
+    // Master node
+    let mut master_cfg = ApplicationConfig::default();
+    master_cfg.node_type = NodeType::Master;
+    let master_client = TCNetClient::new(master_cfg);
+    let mut active = master_client.create_active_node();
+    sleep(Duration::from_millis(400));
+
+    active.load_track(LayerId::L1, TrackMeta {
+        title: "Test Track".into(),
+        artist: "Test Artist".into(),
+        duration_ms: 60_000,
+        bpm: 120.0,
+        track_id: 99,
+    }).expect("load_track failed");
+    sleep(Duration::from_millis(150));
+
+    let dest: SocketAddr = "127.0.0.1:60000".parse().unwrap();
+
+    // Socket A: registers the viewer address via OptIn.
+    // The master will unicast responses to this address.
+    let viewer = UdpSocket::bind("127.0.0.1:0").expect("bind viewer");
+    viewer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    let viewer_port = viewer.local_addr().unwrap().port();
+
+    let viewer_cfg = ApplicationConfig {
+        node_type: NodeType::Slave,
+        address: SocketAddrV4::new(Ipv4Addr::LOCALHOST, viewer_port),
+        ..master_cfg
+    };
+    let (h, d) = opt_in_bytes(&viewer_cfg, 0);
+    send_packet(&viewer, dest, h, d);
+    sleep(Duration::from_millis(150));
+
+    // Socket B: sends the REQUEST from a *different* source port to exercise
+    // the IP-based routing fallback in the REQUEST handler.
+    // The response must still arrive at viewer (socket A) because that is the
+    // registered node address, not at socket B.
+    let requester = UdpSocket::bind("127.0.0.1:0").expect("bind requester");
+    let header = management_header(&viewer_cfg, 20, 201);
+    let req = RequestData { data_type: RequestDataType::SmallWaveformData, layer: LayerId::L1 };
+    let payload = [header.to_bytes().unwrap(), req.to_bytes().unwrap()].concat();
+    requester.send_to(&payload, dest).expect("send REQUEST");
+
+    // Receive the SmallWaveform response on the viewer socket (the registered address).
+    // Skip proactive broadcasts (OptIn/OptOut/Time/Status) as in test_request_response.
+    let mut buf = [0u8; 8192];
+    let mut got_waveform = false;
+    let mut response_src_port = 0u16;
+    loop {
+        match viewer.recv_from(&mut buf) {
+            Ok((size, src)) => {
+                if let Ok(pkt) = Packet::deserialize_packet(&buf[..size]) {
+                    match pkt.data {
+                        crate::node::tcnet_packet::Data::OptIn(_)
+                        | crate::node::tcnet_packet::Data::OptOut(_)
+                        | crate::node::tcnet_packet::Data::Time(_)
+                        | crate::node::tcnet_packet::Data::Status(_) => {}
+                        crate::node::tcnet_packet::Data::SmallWaveform(_) => {
+                            response_src_port = src.port();
+                            got_waveform = true;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    assert!(got_waveform, "SmallWaveform response not received — IP-based routing fallback broken");
+    assert_eq!(
+        response_src_port, 60000,
+        "SmallWaveform came from port {} instead of 60000 — send task must use broadcast_socket",
+        response_src_port
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Loopback discovery test (DJ Link Bridge scenario)
+// ---------------------------------------------------------------------------
+// Verifies that when another process already holds port 60000 (simulating
+// DJ Link Bridge), our client still broadcasts OptIn on the loopback network
+// and can then receive and route DJ packets from the "remote" node.
+
+#[test]
+#[serial]
+fn test_loopback_discovery() {
+    use crate::node::tcnet_packet::{Data, Packet};
+
+    let _ = env_logger::try_init();
+
+    // 1. Occupy port 60000 — mimics DJ Link Bridge holding the canonical port.
+    let dj_link = UdpSocket::bind("127.0.0.1:60000").expect("bind port 60000");
+    dj_link.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+
+    // 2. Create viewer — its broadcast socket falls back to a non-60000 port.
+    let client = TCNetClient::new(ApplicationConfig::default());
+    sleep(Duration::from_millis(500));
+
+    // 3. Wait for viewer's loopback OptIn broadcast (Step 1 fix).
+    let mut buf = [0u8; 8192];
+    let (size, _) = dj_link
+        .recv_from(&mut buf)
+        .expect("no loopback OptIn received — broadcast fix missing");
+
+    // 4. Parse to get viewer's unicast listener port from the OptIn payload.
+    let pkt = Packet::deserialize_packet(&buf[..size]).expect("parse failed");
+    let listener_port = match &pkt.data {
+        Data::OptIn(o) => o.node_listener_port,
+        _ => panic!("expected OptIn, got {:?}", pkt.data),
+    };
+
+    // 5. Send fake OptIn from DJ Link's socket → viewer's unicast port.
+    let viewer_unicast: SocketAddr = format!("127.0.0.1:{}", listener_port).parse().unwrap();
+    let dj_cfg = ApplicationConfig {
+        node_type: NodeType::Master,
+        address: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 60_000),
+        ..ApplicationConfig::default()
+    };
+    let (h, d) = opt_in_bytes(&dj_cfg, 0);
+    send_packet(&dj_link, viewer_unicast, h, d);
+    sleep(Duration::from_millis(100));
+
+    // 6. Send fake Metrics → triggers DjController creation via the existing is_dj_packet path.
+    let (h, d) = metrics_l1_bytes(&dj_cfg, 1);
+    send_packet(&dj_link, viewer_unicast, h, d);
+    sleep(Duration::from_millis(200));
+
+    // 7. DjController must now exist with the correct BPM.
+    let mut view = client
+        .get_any_controller_view()
+        .expect("DjControllerView not available after Metrics — loopback discovery broken");
+    assert_eq!(view.get_layers()[0].bpm.0, TRACK_1_BPM, "BPM mismatch");
 }

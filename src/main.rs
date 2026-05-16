@@ -53,8 +53,12 @@ fn print_state(view: &mut DjControllerView) {
 fn main() {
     env_logger::init();
     let args = Args::parse();
+    let bind_address = args.binding_ip;
+    
+    let mut config = ApplicationConfig::default();
+    config.address.set_ip(bind_address);
 
-    let mut client = TCNetClient::new(args.binding_ip, ApplicationConfig::default());
+    let mut client = TCNetClient::new(config);
 
     // Wait until a foreign node advertising a DJ controller is discovered.
     let mut view = loop {
@@ -66,12 +70,11 @@ fn main() {
             println!("  {} | has_dj_controller={}", n.address, n.has_dj_controller);
         }
 
-        if let Some(node) = nodes.iter().find(|n| n.has_dj_controller) {
-            if let Some(view) = client.get_controller_view(node.address) {
+        if let Some(node) = nodes.iter().find(|n| n.has_dj_controller)
+            && let Some(view) = client.get_controller_view(node.address) {
                 println!("Got DjControllerView for {}\n", node.address);
                 break view;
             }
-        }
     };
 
     loop {

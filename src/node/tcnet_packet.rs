@@ -1,13 +1,13 @@
+use crate::into_ascii;
+use crate::node::dispatcher::timestamp_micros;
+use crate::node::tcnet_packet::Data::*;
 use crate::node::tcnet_packet_serde::*;
+use crate::node::{ApplicationConfig, DynamicNodeState};
+use deku::prelude::Writer;
 use deku::{DekuContainerRead, DekuContainerWrite, DekuError, DekuWrite, DekuWriter};
 use std::fmt::Debug;
 use std::io::{Seek, Write};
-use deku::prelude::Writer;
-use log::trace;
-use crate::into_ascii;
-use crate::node::{ApplicationConfig, DynamicNodeState};
-use crate::node::dispatcher::timestamp_micros;
-use crate::node::tcnet_packet::Data::*;
+use std::net::{Ipv4Addr, SocketAddrV4};
 
 #[derive(Clone, DekuWrite)]
 pub struct Packet
@@ -26,58 +26,58 @@ pub enum SerdeError {
 impl Packet {
     pub fn deserialize_packet(bytes: &[u8]) -> Result<Self, SerdeError> {
         let (remaining, header) = ManagementHeader::from_bytes((bytes, 0))
-            .map_err(|x| SerdeError::InvalidHeader(x))?;
+            .map_err(SerdeError::InvalidHeader)?;
         let packet_type = header.message_type;
 
         let data = match packet_type {
             2 => {
                 let (_, inner) = OptInData::from_bytes(remaining)
-                    .map_err(|x| SerdeError::InvalidData(x))?;
+                    .map_err(SerdeError::InvalidData)?;
                 OptIn(inner)
             }
             3 => {
                 let (_, inner) = OptOutData::from_bytes(remaining)
-                    .map_err(|x| SerdeError::InvalidData(x))?;
+                    .map_err(SerdeError::InvalidData)?;
                 OptOut(inner)
             }
             5 => {
                 let (_, inner) = StatusData::from_bytes(remaining)
-                    .map_err(|x| SerdeError::InvalidData(x))?;
+                    .map_err(SerdeError::InvalidData)?;
                 Status(inner)
             }
             10 => {
                 let (_, inner) = TimeSyncData::from_bytes(remaining)
-                    .map_err(|x| SerdeError::InvalidData(x))?;
+                    .map_err(SerdeError::InvalidData)?;
                 TimeSync(inner)
             }
             13 => {
                 let (_, inner) = ErrorNotificationData::from_bytes(remaining)
-                    .map_err(|x| SerdeError::InvalidData(x))?;
+                    .map_err(SerdeError::InvalidData)?;
                 ErrorNotification(inner)
             }
             20 => {
                 let (_, inner) = RequestData::from_bytes(remaining)
-                    .map_err(|x| SerdeError::InvalidData(x))?;
+                    .map_err(SerdeError::InvalidData)?;
                 Request(inner)
             }
             30 => {
                 let (_, inner) = AppSpecificData::from_bytes(remaining)
-                    .map_err(|x| SerdeError::InvalidData(x))?;
+                    .map_err(SerdeError::InvalidData)?;
                 AppSpecific(inner)
             }
             101 => {
                 let (_, inner) = ControlData::from_bytes(remaining)
-                    .map_err(|x| SerdeError::InvalidData(x))?;
+                    .map_err(SerdeError::InvalidData)?;
                 Control(inner)
             }
             128 => {
                 let (_, inner) = TextData::from_bytes(remaining)
-                    .map_err(|x| SerdeError::InvalidData(x))?;
+                    .map_err(SerdeError::InvalidData)?;
                 Text(inner)
             }
             132 => {
                 let (_, inner) = KeyboardData::from_bytes(remaining)
-                    .map_err(|x| SerdeError::InvalidData(x))?;
+                    .map_err(SerdeError::InvalidData)?;
                 Keyboard(inner)
             }
             200 => {
@@ -87,50 +87,50 @@ impl Packet {
                 match data_type {
                     2 => {
                         let (_, inner) = MetricsData::from_bytes(remaining)
-                            .map_err(|x| SerdeError::InvalidData(x))?;
+                            .map_err(SerdeError::InvalidData)?;
                         Metrics(inner)
                     }
                     4 => {
                         let (_, inner) = MetaData::from_bytes(remaining)
-                            .map_err(|x| SerdeError::InvalidData(x))?;
+                            .map_err(SerdeError::InvalidData)?;
                         Meta(inner)
                     }
                     8 => {
                         let (_, inner) = BeatGridHeader::from_bytes(remaining)
-                            .map_err(|x| SerdeError::InvalidData(x))?;
+                            .map_err(SerdeError::InvalidData)?;
                         BeatGrid(inner)
                     }
                     12 => {
                         let (_, inner) = CueData::from_bytes(remaining)
-                            .map_err(|x| SerdeError::InvalidData(x))?;
+                            .map_err(SerdeError::InvalidData)?;
                         Cue(inner)
                     }
                     16 => {
                         let (_, inner) = SmallWaveformData::from_bytes(remaining)
-                            .map_err(|x| SerdeError::InvalidData(x))?;
+                            .map_err(SerdeError::InvalidData)?;
                         SmallWaveform(inner)
                     }
                     32 => {
                         let (_, inner) = BigWaveformData::from_bytes(remaining)
-                            .map_err(|x| SerdeError::InvalidData(x))?;
+                            .map_err(SerdeError::InvalidData)?;
                         BigWaveform(inner)
+                    }
+                    128 => {
+                        let (_, inner) = ArtworkFileData::from_bytes(remaining)
+                            .map_err(SerdeError::InvalidData)?;
+                        ArtworkFile(inner)
                     }
                     150 => {
                         let (_, inner) = MixerData::from_bytes(remaining)
-                            .map_err(|x| SerdeError::InvalidData(x))?;
+                            .map_err(SerdeError::InvalidData)?;
                         Mixer(inner)
                     }
                     _ => return Err(SerdeError::MessageTypeNotImplemented),
                 }
             }
-            204 => {
-                let (_, inner) = ArtworkFileData::from_bytes(remaining)
-                    .map_err(|x| SerdeError::InvalidData(x))?;
-                ArtworkFile(inner)
-            }
             254 => {
                 let (_, inner) = TimePacketData::from_bytes(remaining)
-                    .map_err(|x| SerdeError::InvalidData(x))?;
+                    .map_err(SerdeError::InvalidData)?;
                 Time(inner)
             }
             _ => return Err(SerdeError::MessageTypeNotImplemented),
@@ -145,14 +145,14 @@ impl Debug for Packet {
     }
 }
 
-pub(crate) fn opt_in_node_config(
+pub(crate) fn node_config_from_opt_in(
+    src_addr: Ipv4Addr,
     header: &ManagementHeader,
     data: &OptInData
 ) -> ApplicationConfig {
     ApplicationConfig {
         node_id: header.node_id,
         node_type: header.node_type,
-        unicast_port: data.node_listener_port,
         vendor_name: data.vendor_name,
         application_name: data.application,
         application_major_version: data.application_major_version,
@@ -160,6 +160,7 @@ pub(crate) fn opt_in_node_config(
         application_bug_version: data.application_bug_version,
         node_name: header.node_name,
         node_options: header.node_options,
+        address: SocketAddrV4::new(src_addr, data.node_listener_port),
     }
 }
 
@@ -181,8 +182,8 @@ pub(crate) fn management_header(app_config: &ApplicationConfig, message_type: u8
 pub(crate) fn opt_in_packet(app_config: &ApplicationConfig, node_state: &DynamicNodeState, seq: u8) -> Result<Vec<u8>, DekuError> {
     let header = management_header(app_config, 2, seq);
     let data = OptInData{
-        node_count: node_state.discovered_nodes.len() as u16,
-        node_listener_port: app_config.unicast_port,
+        node_count: (node_state.discovered_nodes.len() + 1) as u16,
+        node_listener_port: app_config.address.port(),
         uptime: node_state.uptime,
         _reserved0: Default::default(),
         vendor_name: app_config.vendor_name,
@@ -219,7 +220,7 @@ impl Data {
             BigWaveform(_) => (200, Some(32)),
             Mixer(_) => (200, Some(150)),
 
-            ArtworkFile(_) => (204, None),
+            ArtworkFile(_) => (200, Some(128)),
             // AppSpecific(_) => 254, None)
             Time(_) => (254, None),
         }

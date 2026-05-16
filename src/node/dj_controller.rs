@@ -1,12 +1,12 @@
-use std::collections::HashMap;
-use std::net::Ipv4Addr;
-use std::time::{Duration, Instant};
-use tokio::sync::oneshot;
 use crate::node::tcnet_packet::{Data, Packet};
 use crate::node::tcnet_packet_serde::{
-    ArtworkFileData, BigWaveformData, Bpm, LayerId, LayerState, MixerChannel,
+    ArtworkFileData, BeatGridHeader, BigWaveformData, Bpm, LayerId, LayerState, MixerChannel,
     RequestData, RequestDataType, SmallWaveformData, SmpteMode, Speed,
 };
+use std::collections::HashMap;
+use std::net::SocketAddrV4;
+use std::time::{Duration, Instant};
+use tokio::sync::oneshot;
 
 // ---------------------------------------------------------------------------
 // Snapshot types
@@ -170,7 +170,7 @@ impl LayerSnapshot {
 // Triple buffer payload
 // ---------------------------------------------------------------------------
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DjControllerState {
     pub layers: Vec<LayerSnapshot>,
     pub mixer: MixerSnapshot,
@@ -209,11 +209,14 @@ pub(crate) enum UserRequest {
         layer: LayerId,
         reply: oneshot::Sender<Result<ArtworkFileData, TimeoutError>>,
     },
+    BeatGrid {
+        layer: LayerId,
+        reply: oneshot::Sender<Result<BeatGridHeader, TimeoutError>>,
+    },
 }
 
 pub(crate) struct OutgoingRequest {
-    pub destination: Ipv4Addr,
-    pub unicast_port: u16,
+    pub destination: SocketAddrV4,
     pub data: Data,
 }
 
@@ -221,6 +224,7 @@ pub(crate) struct OutgoingRequest {
 // DjController — held by ForeignNode
 // ---------------------------------------------------------------------------
 
+#[derive(Debug)]
 pub(crate) struct DjController {
     pub packet_tx: kanal::Sender<Packet>,
     pub request_tx: kanal::Sender<UserRequest>,
@@ -231,9 +235,8 @@ pub(crate) struct DjController {
 impl DjController {
     pub fn new(
         outgoing_tx: kanal::Sender<OutgoingRequest>,
-        foreign_addr: Ipv4Addr,
-        unicast_port: u16,
-    ) -> (Self, impl std::future::Future<Output = ()>) {
+        foreign_addr: SocketAddrV4,
+    ) -> (Self, impl Future<Output = ()>) {
         let (packet_tx, packet_rx) = kanal::bounded::<Packet>(100);
         let (request_tx, request_rx) = kanal::bounded::<UserRequest>(16);
         let (buf_input, buf_output) =
@@ -245,7 +248,6 @@ impl DjController {
             outgoing_tx,
             buf_input,
             foreign_addr,
-            unicast_port,
         );
 
         let ctrl = DjController {
@@ -265,6 +267,17 @@ enum PendingReply {
     SmallWaveform(oneshot::Sender<Result<SmallWaveformData, TimeoutError>>),
     BigWaveform(oneshot::Sender<Result<BigWaveformData, TimeoutError>>),
     ArtworkFile(oneshot::Sender<Result<ArtworkFileData, TimeoutError>>),
+    BeatGrid {
+        reply: oneshot::Sender<Result<BeatGridHeader, TimeoutError>>,
+        /// Per-packet payload chunks, indexed by `packet_no`. `None` for chunks
+        /// not yet received. Sized lazily to `total_packets` when the first
+        /// chunk arrives.
+        chunks: Vec<Option<Vec<u8>>>,
+        /// Layer id from the first chunk — emitted on the reassembled header.
+        layer_id: u8,
+        /// Total payload size in bytes from the first chunk's `data_size`.
+        total_data_size: u32,
+    },
 }
 
 struct PendingRequest {
@@ -283,6 +296,7 @@ fn fire_timeout(pending: &mut Vec<PendingRequest>) {
                 PendingReply::SmallWaveform(tx) => { let _ = tx.send(Err(TimeoutError)); }
                 PendingReply::BigWaveform(tx)   => { let _ = tx.send(Err(TimeoutError)); }
                 PendingReply::ArtworkFile(tx)   => { let _ = tx.send(Err(TimeoutError)); }
+                PendingReply::BeatGrid { reply, .. } => { let _ = reply.send(Err(TimeoutError)); }
             }
         } else {
             i += 1;
@@ -299,8 +313,7 @@ async fn dj_controller_task(
     request_rx: kanal::Receiver<UserRequest>,
     outgoing_tx: kanal::Sender<OutgoingRequest>,
     mut buf_input: triple_buffer::Input<DjControllerState>,
-    foreign_addr: Ipv4Addr,
-    unicast_port: u16,
+    foreign_addr: SocketAddrV4,
 ) {
     let mut layers: HashMap<LayerId, LayerSnapshot> = {
         let mut m = HashMap::new();
@@ -315,7 +328,7 @@ async fn dj_controller_task(
     loop {
         // --- drain incoming packets ---
         let mut packets = Vec::new();
-        let _ = packet_rx.drain_into(&mut packets);
+        if packet_rx.drain_into(&mut packets).is_err() { break; }
 
         for packet in packets {
             // check if this packet satisfies a pending request
@@ -371,6 +384,83 @@ async fn dj_controller_task(
                         }
                     }
                 }
+                Data::BeatGrid(b) => {
+                    if let Some(layer) = LayerId::from_packet_id(b.layer_id) {
+                        // Multi-packet reassembly: accumulate payloads keyed by
+                        // packet_no, complete the pending request once every
+                        // packet has arrived (or pass through immediately for
+                        // a single-packet response).
+                        let mut i = 0;
+                        while i < pending.len() {
+                            if pending[i].layer != layer
+                                || !matches!(pending[i].reply, PendingReply::BeatGrid { .. })
+                            {
+                                i += 1;
+                                continue;
+                            }
+
+                            let total_packets = b.total_packets.max(1) as usize;
+                            let pkt_no = b.packet_no as usize;
+
+                            // Initialise the accumulator from the first
+                            // chunk's header so we have the right size.
+                            if let PendingReply::BeatGrid {
+                                chunks,
+                                layer_id,
+                                total_data_size,
+                                ..
+                            } = &mut pending[i].reply
+                            {
+                                if chunks.is_empty() {
+                                    chunks.resize(total_packets, None);
+                                    *layer_id = b.layer_id;
+                                    *total_data_size = b.data_size;
+                                }
+                                if pkt_no < chunks.len() {
+                                    chunks[pkt_no] = Some(b.payload.clone());
+                                }
+                            }
+
+                            // Are we done?
+                            let complete = if let PendingReply::BeatGrid {
+                                chunks, ..
+                            } = &pending[i].reply
+                            {
+                                !chunks.is_empty() && chunks.iter().all(|c| c.is_some())
+                            } else {
+                                false
+                            };
+
+                            if complete {
+                                let p = pending.swap_remove(i);
+                                if let PendingReply::BeatGrid {
+                                    reply,
+                                    chunks,
+                                    layer_id,
+                                    total_data_size,
+                                } = p.reply
+                                {
+                                    let mut assembled: Vec<u8> =
+                                        Vec::with_capacity(total_data_size as usize);
+                                    for chunk in chunks.into_iter().flatten() {
+                                        assembled.extend(chunk);
+                                    }
+                                    let assembled_size = assembled.len() as u32;
+                                    let header = BeatGridHeader::new_packet(
+                                        layer_id,
+                                        assembled_size,
+                                        1,
+                                        0,
+                                        assembled,
+                                    );
+                                    let _ = reply.send(Ok(header));
+                                }
+                            } else {
+                                i += 1;
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
 
@@ -387,14 +477,13 @@ async fn dj_controller_task(
 
         // --- drain user requests ---
         let mut requests = Vec::new();
-        let _ = request_rx.drain_into(&mut requests);
+        if request_rx.drain_into(&mut requests).is_err() { break; }
 
         for req in requests {
             match req {
                 UserRequest::SmallWaveform { layer, reply } => {
                     let _ = outgoing_tx.send(OutgoingRequest {
                         destination: foreign_addr,
-                        unicast_port,
                         data: Data::Request(RequestData {
                             data_type: RequestDataType::SmallWaveformData,
                             layer,
@@ -409,7 +498,6 @@ async fn dj_controller_task(
                 UserRequest::BigWaveform { layer, reply } => {
                     let _ = outgoing_tx.send(OutgoingRequest {
                         destination: foreign_addr,
-                        unicast_port,
                         data: Data::Request(RequestData {
                             data_type: RequestDataType::LargeWaveformData,
                             layer,
@@ -424,7 +512,6 @@ async fn dj_controller_task(
                 UserRequest::ArtworkFile { layer, reply } => {
                     let _ = outgoing_tx.send(OutgoingRequest {
                         destination: foreign_addr,
-                        unicast_port,
                         data: Data::Request(RequestData {
                             data_type: RequestDataType::LowResArtworkFile,
                             layer,
@@ -434,6 +521,25 @@ async fn dj_controller_task(
                         layer,
                         deadline: Instant::now() + Duration::from_secs(5),
                         reply: PendingReply::ArtworkFile(reply),
+                    });
+                }
+                UserRequest::BeatGrid { layer, reply } => {
+                    let _ = outgoing_tx.send(OutgoingRequest {
+                        destination: foreign_addr,
+                        data: Data::Request(RequestData {
+                            data_type: RequestDataType::BeatGridData,
+                            layer,
+                        }),
+                    });
+                    pending.push(PendingRequest {
+                        layer,
+                        deadline: Instant::now() + Duration::from_secs(5),
+                        reply: PendingReply::BeatGrid {
+                            reply,
+                            chunks: Vec::new(),
+                            layer_id: 0,
+                            total_data_size: 0,
+                        },
                     });
                 }
             }
