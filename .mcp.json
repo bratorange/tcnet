@@ -4,6 +4,14 @@
       "command": "/Users/juliusschmitt/Rust/tcnet-rs/local_crates/egui-mcp-server/target/debug/egui-mcp-server",
       "args": ["serve"],
       "env": { "EGUI_MCP_APP_NAME": "CDJ Simulator" }
+    },
+    "egui-mcp-luchs": {
+      "command": "/Users/juliusschmitt/Rust/tcnet-rs/local_crates/egui-mcp-server/target/debug/egui-mcp-server",
+      "args": ["serve"],
+      "env": {
+        "EGUI_MCP_APP_NAME": "LUCHS",
+        "EGUI_MCP_SOCKET": "/tmp/egui-mcp-luchs.sock"
+      }
     }
   }
 }

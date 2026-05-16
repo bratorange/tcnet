@@ -12,10 +12,12 @@ use tokio::sync::RwLock;
 
 pub mod node;
 pub mod active_node;
+#[cfg(any(feature = "simulator", feature = "luchs"))]
+pub mod python_helper;
 #[cfg(feature = "simulator")]
 pub mod simulator;
-#[cfg(feature = "viewer")]
-pub mod viewer;
+#[cfg(feature = "luchs")]
+pub mod luchs;
 mod dj_controller_view;
 #[cfg(test)]
 mod tests;
@@ -25,7 +27,9 @@ pub use dj_controller_view::{DjControllerView, WaveformRequester};
 pub use node::dj_controller::{
     ChannelSnapshot, DjControllerState, LayerSnapshot, MixerSnapshot, TimeoutError,
 };
-pub use node::tcnet_packet_serde::{BigWaveformData, LayerId, NodeType, SmallWaveformData};
+pub use node::tcnet_packet_serde::{
+    BeatGridEntry, BeatGridHeader, BigWaveformData, LayerId, NodeType, SmallWaveformData,
+};
 pub use node::ApplicationConfig;
 
 const SPEC_MAJOR_VERSION: u8 = 3;
@@ -138,6 +142,13 @@ impl TCNetClient {
             }
             None
         })
+    }
+
+    /// Returns a clonable handle to the internal tokio runtime so embedders can
+    /// spawn supplementary async work (e.g. background waveform requests) on it
+    /// without bringing up their own runtime.
+    pub fn runtime_handle(&self) -> tokio::runtime::Handle {
+        self._runtime.handle().clone()
     }
 
     /// Creates an `ActiveDJNode` that broadcasts this node's state over TCNet.
