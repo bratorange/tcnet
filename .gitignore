@@ -1,4 +1,5 @@
-/target
+target
 /TCNet-*.pdf
 *.pdf
 /.claude/settings.local.json
+/artifacts

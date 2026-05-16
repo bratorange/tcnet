@@ -1,0 +1,36 @@
+[package]
+name = "egui-mcp-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "MCP server for egui UI automation"
+
+[[bin]]
+name = "egui-mcp-server"
+path = "src/main.rs"
+
+[dependencies]
+egui-mcp-protocol = { workspace = true }
+rmcp = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+schemars = { workspace = true }
+base64 = { workspace = true }
+image = "0.25"
+image-compare = "0.4"
+clap = { version = "4", features = ["derive"] }
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/{ name }-v{ version }/{ name }-v{ version }-{ target }{ archive-suffix }"
+pkg-fmt = "tgz"
+
+# AT-SPI for Linux accessibility
+[target.'cfg(target_os = "linux")'.dependencies]
+atspi = { version = "0.29", default-features = false, features = ["connection", "proxies", "tokio"] }
+

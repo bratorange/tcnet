@@ -1,0 +1,17 @@
+[package]
+name = "egui-mcp-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Library to embed in egui apps for MCP integration"
+
+[dependencies]
+egui-mcp-protocol = { workspace = true }
+egui = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = "0.3"
+parking_lot = "0.12"
+base64 = { workspace = true }
+image = "0.25"

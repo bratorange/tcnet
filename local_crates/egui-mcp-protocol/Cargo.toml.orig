@@ -1,0 +1,14 @@
+[package]
+name = "egui-mcp-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Common protocol definitions for egui-mcp"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+# accesskit = { workspace = true }  # Removed: not actually used
+thiserror = { workspace = true }
+tokio = { workspace = true }

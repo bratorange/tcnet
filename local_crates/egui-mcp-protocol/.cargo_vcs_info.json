@@ -1,0 +1,6 @@
+{
+  "git": {
+    "sha1": "e72926b0285913ac2b145539f9a0d58f15c4560c"
+  },
+  "path_in_vcs": "crates/egui-mcp-protocol"
+}
