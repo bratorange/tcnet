@@ -603,6 +603,80 @@ impl ActiveDJNode {
         self.inner.lock().unwrap().layer_mut(layer).on_air = on_air;
     }
 
+    /// Overwrite the cached beat-grid response packets for `layer` with
+    /// audio-derived entries. `entries` is a sequence of
+    /// `(beat_number, beat_type, timestamp_ms)` where `beat_type` follows the
+    /// TCNet convention (20 = downbeat, 10 = upbeat). Splits across 2400-byte
+    /// clusters per spec.
+    pub fn set_response_beat_grid(&self, layer: LayerId, entries: &[(u16, u8, u32)]) {
+        use deku::DekuContainerWrite;
+        let lid = layer.as_packet_id();
+        let serialized: Vec<u8> = entries
+            .iter()
+            .flat_map(|(beat_number, beat_type, beat_timestamp)| {
+                BeatGridEntry::new(*beat_number, *beat_type, *beat_timestamp)
+                    .to_bytes()
+                    .unwrap_or_default()
+            })
+            .collect();
+        let total = serialized.len() as u32;
+
+        if let Ok(mut rd) = self.response_data.lock() {
+            let ld = &mut rd.layers[layer.index()];
+            ld.beat_grid_packets = if serialized.is_empty() {
+                vec![Data::BeatGrid(BeatGridHeader::new_packet(lid, 0, 1, 0, vec![]))]
+            } else {
+                let n_packets = (serialized.len()).div_ceil(2400).max(1) as u32;
+                serialized
+                    .chunks(2400)
+                    .enumerate()
+                    .map(|(i, chunk)| {
+                        Data::BeatGrid(BeatGridHeader::new_packet(
+                            lid,
+                            total,
+                            n_packets,
+                            i as u32,
+                            chunk.to_vec(),
+                        ))
+                    })
+                    .collect()
+            };
+        }
+    }
+
+    /// Overwrite the cached response packets for SmallWaveform and BigWaveform
+    /// for `layer`. The dispatcher will return these in response to TCNet
+    /// `RequestData` messages. Call after `load_track` to replace the
+    /// placeholder bytes with audio-derived data.
+    pub fn set_response_waveforms(&self, layer: LayerId, small: [u8; 2400], big: Vec<u8>) {
+        if let Ok(mut rd) = self.response_data.lock() {
+            let ld = &mut rd.layers[layer.index()];
+            let lid = layer.as_packet_id();
+            ld.small_waveform_packet =
+                Some(Data::SmallWaveform(SmallWaveformData::new(lid, small)));
+
+            let total = big.len() as u32;
+            // Split big into 4400-byte clusters (matches the existing placeholder convention).
+            ld.big_waveform_packets = if big.is_empty() {
+                vec![]
+            } else {
+                let n_packets = (total as usize).div_ceil(4400).max(1) as u32;
+                big.chunks(4400)
+                    .enumerate()
+                    .map(|(i, chunk)| {
+                        Data::BigWaveform(BigWaveformData::new_packet(
+                            lid,
+                            total,
+                            n_packets,
+                            i as u32,
+                            chunk.to_vec(),
+                        ))
+                    })
+                    .collect()
+            };
+        }
+    }
+
     // --- state read access ---
 
     pub fn layers(&self) -> Vec<LayerSnapshot> {

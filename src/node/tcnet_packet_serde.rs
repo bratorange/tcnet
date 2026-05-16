@@ -446,15 +446,15 @@ pub struct MetaData {
 #[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
 pub struct BeatGridHeader {
     data_type: u8,                      // Datatype 8 = Beat Grid Data
-    layer_id: u8,                       // Layer Number
+    pub layer_id: u8,                   // Layer Number
     #[deku(endian = "little")]
-    data_size: u32,                     // Total Data Size (bytes of all entries combined)
+    pub data_size: u32,                 // Total Data Size (bytes of all entries combined)
     #[deku(endian = "little")]
-    total_packets: u32,                 // Total Packets used for data
+    pub total_packets: u32,             // Total Packets used for data
     #[deku(endian = "little")]
-    packet_no: u32,                     // Packet Number
+    pub packet_no: u32,                 // Packet Number
     #[deku(endian = "little")]
-    data_cluster_size: u32,             // Bytes of entry data in this packet
+    pub data_cluster_size: u32,         // Bytes of entry data in this packet
     #[deku(count = "data_cluster_size")]
     pub payload: Vec<u8>,               // Serialised BeatGridEntry items (8 bytes each)
 }
@@ -462,11 +462,11 @@ pub struct BeatGridHeader {
 #[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
 pub struct BeatGridEntry {
     #[deku(endian = "little")]
-    beat_number: u16,                   // Beat Number
-    beat_type: u8,                      // 20 = Downbeat, 10 = Upbeat
+    pub beat_number: u16,               // Beat Number
+    pub beat_type: u8,                  // 20 = Downbeat, 10 = Upbeat
     _reserved0: ReservedData<1>,        // RESERVED
     #[deku(endian = "little")]
-    beat_timestamp: u32,                // Timestamp in MS
+    pub beat_timestamp: u32,            // Timestamp in MS
 }
 
 // DATA PACKET - CUE DATA (Message Type 200, Data Type 12)

@@ -35,7 +35,13 @@ impl CDJDeck {
         }
     }
 
-    pub fn load(&mut self, track: TrackInfo, engine: &AudioEngine, node: &mut ActiveDJNode) {
+    pub fn load(
+        &mut self,
+        track: TrackInfo,
+        engine: &AudioEngine,
+        node: &mut ActiveDJNode,
+        script_dir: &std::path::Path,
+    ) {
         self.sink = None;
         self.play_start = None;
         self.paused_position = 0;
@@ -43,6 +49,24 @@ impl CDJDeck {
         self.cue_ms = 0;
         self.bpm = track.bpm.unwrap_or(120.0);
         self.waveform = placeholder_waveform(track.duration_ms);
+
+        // Compute waveforms + analyse beats BEFORE publishing the new track_id
+        // over TCNet so the first request from a passive listener doesn't race
+        // with the pre-filled placeholder bytes that `node.load_track` writes.
+        // Synchronously blocks the simulator for the duration of audio decode
+        // + beat analysis (~5-15s for a 4-minute WAV); acceptable for a test
+        // fixture.
+        let waveforms = crate::simulator::waveform_gen::compute_waveforms(&track.path);
+        let beats =
+            crate::simulator::beatgrid_gen::detect(script_dir, &track.path, track.duration_ms);
+
+        // If we detected a real BPM, prefer it over the lofty tag (which is
+        // often missing or wrong for production tracks).
+        if let Some(b) = beats.as_ref() {
+            if b.bpm > 30.0 && b.bpm < 250.0 {
+                self.bpm = b.bpm;
+            }
+        }
 
         let meta = TrackMeta {
             title: track.title.clone(),
@@ -52,6 +76,23 @@ impl CDJDeck {
             track_id: simple_hash(&track.title),
         };
         let _ = node.load_track(self.layer_id, meta);
+
+        if let Some(wf) = waveforms {
+            node.set_response_waveforms(self.layer_id, wf.small, wf.big);
+        }
+        if let Some(b) = beats {
+            if !b.entries.is_empty() {
+                node.set_response_beat_grid(self.layer_id, &b.entries);
+            }
+        }
+
+        // Default the layer's on_air byte to the channel fader so passive
+        // viewers (LUCHS) see the deck as contributing to master output
+        // without requiring the user to first drag the fader.
+        if let Some(ch_idx) = layer_to_channel_idx(self.layer_id) {
+            let fader = node.channel_snapshot(ch_idx).fader_level;
+            node.set_on_air(self.layer_id, fader);
+        }
 
         let sink = engine.new_sink();
         sink.pause();
@@ -169,6 +210,18 @@ impl CDJDeck {
     pub fn format_time(ms: u32) -> String {
         let secs = ms / 1000;
         format!("{:02}:{:02}", secs / 60, secs % 60)
+    }
+}
+
+/// Map LayerId::L1..L4 to mixer channel index 0..3. Returns None for layers
+/// without a corresponding hardware channel.
+fn layer_to_channel_idx(layer: LayerId) -> Option<usize> {
+    match layer {
+        LayerId::L1 => Some(0),
+        LayerId::L2 => Some(1),
+        LayerId::L3 => Some(2),
+        LayerId::L4 => Some(3),
+        _ => None,
     }
 }
 

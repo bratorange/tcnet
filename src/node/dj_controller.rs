@@ -1,6 +1,6 @@
 use crate::node::tcnet_packet::{Data, Packet};
 use crate::node::tcnet_packet_serde::{
-    ArtworkFileData, BigWaveformData, Bpm, LayerId, LayerState, MixerChannel,
+    ArtworkFileData, BeatGridHeader, BigWaveformData, Bpm, LayerId, LayerState, MixerChannel,
     RequestData, RequestDataType, SmallWaveformData, SmpteMode, Speed,
 };
 use std::collections::HashMap;
@@ -209,6 +209,10 @@ pub(crate) enum UserRequest {
         layer: LayerId,
         reply: oneshot::Sender<Result<ArtworkFileData, TimeoutError>>,
     },
+    BeatGrid {
+        layer: LayerId,
+        reply: oneshot::Sender<Result<BeatGridHeader, TimeoutError>>,
+    },
 }
 
 pub(crate) struct OutgoingRequest {
@@ -263,6 +267,17 @@ enum PendingReply {
     SmallWaveform(oneshot::Sender<Result<SmallWaveformData, TimeoutError>>),
     BigWaveform(oneshot::Sender<Result<BigWaveformData, TimeoutError>>),
     ArtworkFile(oneshot::Sender<Result<ArtworkFileData, TimeoutError>>),
+    BeatGrid {
+        reply: oneshot::Sender<Result<BeatGridHeader, TimeoutError>>,
+        /// Per-packet payload chunks, indexed by `packet_no`. `None` for chunks
+        /// not yet received. Sized lazily to `total_packets` when the first
+        /// chunk arrives.
+        chunks: Vec<Option<Vec<u8>>>,
+        /// Layer id from the first chunk — emitted on the reassembled header.
+        layer_id: u8,
+        /// Total payload size in bytes from the first chunk's `data_size`.
+        total_data_size: u32,
+    },
 }
 
 struct PendingRequest {
@@ -281,6 +296,7 @@ fn fire_timeout(pending: &mut Vec<PendingRequest>) {
                 PendingReply::SmallWaveform(tx) => { let _ = tx.send(Err(TimeoutError)); }
                 PendingReply::BigWaveform(tx)   => { let _ = tx.send(Err(TimeoutError)); }
                 PendingReply::ArtworkFile(tx)   => { let _ = tx.send(Err(TimeoutError)); }
+                PendingReply::BeatGrid { reply, .. } => { let _ = reply.send(Err(TimeoutError)); }
             }
         } else {
             i += 1;
@@ -368,6 +384,83 @@ async fn dj_controller_task(
                         }
                     }
                 }
+                Data::BeatGrid(b) => {
+                    if let Some(layer) = LayerId::from_packet_id(b.layer_id) {
+                        // Multi-packet reassembly: accumulate payloads keyed by
+                        // packet_no, complete the pending request once every
+                        // packet has arrived (or pass through immediately for
+                        // a single-packet response).
+                        let mut i = 0;
+                        while i < pending.len() {
+                            if pending[i].layer != layer
+                                || !matches!(pending[i].reply, PendingReply::BeatGrid { .. })
+                            {
+                                i += 1;
+                                continue;
+                            }
+
+                            let total_packets = b.total_packets.max(1) as usize;
+                            let pkt_no = b.packet_no as usize;
+
+                            // Initialise the accumulator from the first
+                            // chunk's header so we have the right size.
+                            if let PendingReply::BeatGrid {
+                                chunks,
+                                layer_id,
+                                total_data_size,
+                                ..
+                            } = &mut pending[i].reply
+                            {
+                                if chunks.is_empty() {
+                                    chunks.resize(total_packets, None);
+                                    *layer_id = b.layer_id;
+                                    *total_data_size = b.data_size;
+                                }
+                                if pkt_no < chunks.len() {
+                                    chunks[pkt_no] = Some(b.payload.clone());
+                                }
+                            }
+
+                            // Are we done?
+                            let complete = if let PendingReply::BeatGrid {
+                                chunks, ..
+                            } = &pending[i].reply
+                            {
+                                !chunks.is_empty() && chunks.iter().all(|c| c.is_some())
+                            } else {
+                                false
+                            };
+
+                            if complete {
+                                let p = pending.swap_remove(i);
+                                if let PendingReply::BeatGrid {
+                                    reply,
+                                    chunks,
+                                    layer_id,
+                                    total_data_size,
+                                } = p.reply
+                                {
+                                    let mut assembled: Vec<u8> =
+                                        Vec::with_capacity(total_data_size as usize);
+                                    for chunk in chunks.into_iter().flatten() {
+                                        assembled.extend(chunk);
+                                    }
+                                    let assembled_size = assembled.len() as u32;
+                                    let header = BeatGridHeader::new_packet(
+                                        layer_id,
+                                        assembled_size,
+                                        1,
+                                        0,
+                                        assembled,
+                                    );
+                                    let _ = reply.send(Ok(header));
+                                }
+                            } else {
+                                i += 1;
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
 
@@ -428,6 +521,25 @@ async fn dj_controller_task(
                         layer,
                         deadline: Instant::now() + Duration::from_secs(5),
                         reply: PendingReply::ArtworkFile(reply),
+                    });
+                }
+                UserRequest::BeatGrid { layer, reply } => {
+                    let _ = outgoing_tx.send(OutgoingRequest {
+                        destination: foreign_addr,
+                        data: Data::Request(RequestData {
+                            data_type: RequestDataType::BeatGridData,
+                            layer,
+                        }),
+                    });
+                    pending.push(PendingRequest {
+                        layer,
+                        deadline: Instant::now() + Duration::from_secs(5),
+                        reply: PendingReply::BeatGrid {
+                            reply,
+                            chunks: Vec::new(),
+                            layer_id: 0,
+                            total_data_size: 0,
+                        },
                     });
                 }
             }

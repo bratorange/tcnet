@@ -40,6 +40,7 @@ pub struct SimulatorApp {
     node: ActiveDJNode,
     audio: AudioEngine,
     usb: VirtualUsb,
+    script_dir: std::path::PathBuf,
     show_browser: bool,
     browser_target: u8,
     browser_filter: String,
@@ -51,7 +52,15 @@ pub struct SimulatorApp {
 }
 
 impl SimulatorApp {
-    pub fn new(node: ActiveDJNode, usb: VirtualUsb, audio: AudioEngine, bridge: Option<Arc<Mutex<SimBridge>>>, mcp_client: McpClient, rt: tokio::runtime::Runtime) -> Self {
+    pub fn new(
+        node: ActiveDJNode,
+        usb: VirtualUsb,
+        audio: AudioEngine,
+        script_dir: std::path::PathBuf,
+        bridge: Option<Arc<Mutex<SimBridge>>>,
+        mcp_client: McpClient,
+        rt: tokio::runtime::Runtime,
+    ) -> Self {
         let mut mixer = MixerSnapshot::default();
         mixer.mixer_name = "DJM-A9".to_string();
         for ch in &mut mixer.channels {
@@ -70,6 +79,7 @@ impl SimulatorApp {
             node,
             audio,
             usb,
+            script_dir,
             show_browser: false,
             browser_target: 1,
             browser_filter: String::new(),
@@ -113,8 +123,8 @@ impl SimulatorApp {
                             || t.artist.to_lowercase().contains(&filter_lc))
                         .cloned()
                     {
-                        if deck == 1 { self.deck1.load(track, &self.audio, &mut self.node); }
-                        else if deck == 2 { self.deck2.load(track, &self.audio, &mut self.node); }
+                        if deck == 1 { self.deck1.load(track, &self.audio, &mut self.node, &self.script_dir); }
+                        else if deck == 2 { self.deck2.load(track, &self.audio, &mut self.node, &self.script_dir); }
                     }
                 }
                 SimCmd::SetCrossfader(value) => {
@@ -207,9 +217,9 @@ impl SimulatorApp {
                             if resp.double_clicked() {
                                 let target = self.browser_target;
                                 if target == 1 {
-                                    self.deck1.load(track, &self.audio, &mut self.node);
+                                    self.deck1.load(track, &self.audio, &mut self.node, &self.script_dir);
                                 } else {
-                                    self.deck2.load(track, &self.audio, &mut self.node);
+                                    self.deck2.load(track, &self.audio, &mut self.node, &self.script_dir);
                                 }
                                 self.show_browser = false;
                             }

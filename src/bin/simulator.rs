@@ -94,7 +94,8 @@ fn main() {
         });
     });
 
-    let app = SimulatorApp::new(active_node, usb, audio, bridge, mcp_client, rt);
+    let script_dir = locate_scripts_dir();
+    let app = SimulatorApp::new(active_node, usb, audio, script_dir, bridge, mcp_client, rt);
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -114,4 +115,23 @@ fn main() {
     ).expect("Failed to start eframe");
 
     drop(client);
+}
+
+/// Locate the in-repo `scripts/` directory by walking up from the binary
+/// location. Falls back to `./scripts`.
+fn locate_scripts_dir() -> PathBuf {
+    let mut dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."));
+    for _ in 0..6 {
+        let candidate = dir.join("scripts").join("sim_beatgrid.py");
+        if candidate.exists() {
+            return dir.join("scripts");
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    PathBuf::from("scripts")
 }
