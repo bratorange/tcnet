@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-
+use log::info;
 use crate::luchs::phrase_types::{MpCurve, PitchContour, Segment};
 
 use super::allin1;
@@ -45,6 +45,8 @@ struct Job {
     deck_idx: usize,
     track_id: u32,
     audio_path: PathBuf,
+    title: String,
+    artist: String,
     priority: AnalysisPriority,
 }
 
@@ -93,11 +95,15 @@ impl AnalysisManager {
     }
 
     /// Enqueue analysis for a deck. Idempotent for the same (deck, track_id).
+    /// `title` and `artist` are the broadcast metadata; they drive the cache
+    /// key so analysis output is portable across machines / file moves.
     pub fn submit(
         &mut self,
         deck_idx: usize,
         track_id: u32,
         audio_path: PathBuf,
+        title: String,
+        artist: String,
         priority: AnalysisPriority,
     ) {
         if deck_idx >= 4 {
@@ -111,6 +117,8 @@ impl AnalysisManager {
             deck_idx,
             track_id,
             audio_path,
+            title,
+            artist,
             priority,
         });
     }
@@ -144,7 +152,7 @@ fn run_job(
     mp_pitch_script: &std::path::Path,
     events: &kanal::Sender<AnalysisEvent>,
 ) {
-    let key = cache::key_for_file(&job.audio_path);
+    let key = cache::key_for_track(&job.title, &job.artist);
     let cache_dir = match cache::ensure_dir(&key) {
         Ok(p) => p,
         Err(e) => {

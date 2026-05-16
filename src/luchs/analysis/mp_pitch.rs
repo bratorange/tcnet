@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
+use log::info;
 use serde::Deserialize;
 
 use crate::luchs::phrase_types::{MpCurve, PitchContour};
@@ -60,6 +60,8 @@ pub fn run(
                 stderr.trim()
             )));
         }
+    } else { 
+        info!("Using cached mp_pitch output: {}", json_path.display());
     }
 
     parse_json(&json_path)

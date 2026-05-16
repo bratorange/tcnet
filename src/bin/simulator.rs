@@ -5,9 +5,9 @@ use std::sync::{Arc, Mutex};
 use tcnet::simulator::app::SimulatorApp;
 use tcnet::simulator::audio::AudioEngine;
 use tcnet::simulator::mcp::SimBridge;
-use tcnet::simulator::virtual_usb::VirtualUsb;
 use tcnet::{ApplicationConfig, NodeType, TCNetClient};
 use egui_mcp_client::{IpcServer, McpClient};
+use tcnet::media_library::VirtualUsb;
 
 #[derive(Parser)]
 #[command(name = "simulator", about = "DJ Deck simulator")]

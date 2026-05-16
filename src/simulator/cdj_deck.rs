@@ -3,9 +3,9 @@ use std::io::BufReader;
 use std::time::Instant;
 use rodio::{Decoder, Sink};
 use crate::active_node::{ActiveDJNode, TrackMeta};
+use crate::media_library::TrackInfo;
 use crate::node::tcnet_packet_serde::{LayerId, LayerState};
 use crate::simulator::audio::AudioEngine;
-use crate::simulator::virtual_usb::TrackInfo;
 
 pub struct CDJDeck {
     pub layer_id: LayerId,

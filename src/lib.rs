@@ -14,6 +14,8 @@ pub mod node;
 pub mod active_node;
 #[cfg(any(feature = "simulator", feature = "luchs"))]
 pub mod python_helper;
+#[cfg(any(feature = "simulator", feature = "luchs"))]
+pub mod media_library;
 #[cfg(feature = "simulator")]
 pub mod simulator;
 #[cfg(feature = "luchs")]
@@ -31,9 +33,6 @@ pub use node::tcnet_packet_serde::{
     BeatGridEntry, BeatGridHeader, BigWaveformData, LayerId, NodeType, SmallWaveformData,
 };
 pub use node::ApplicationConfig;
-
-const SPEC_MAJOR_VERSION: u8 = 3;
-const SPEC_MINOR_VERSION: u8 = 6;
 
 /// Snapshot of a discovered foreign node, readable via `TCNetClient::active_nodes()`.
 #[derive(Clone, Debug)]

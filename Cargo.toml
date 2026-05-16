@@ -24,7 +24,7 @@ required-features = ["luchs"]
 
 [features]
 simulator = ["dep:eframe", "dep:egui", "dep:rodio", "dep:lofty", "dep:egui-mcp-client", "dep:egui-mcp-protocol", "dep:image", "egui/accesskit", "dep:accesskit", "dep:serde", "dep:serde_json"]
-luchs = ["dep:eframe", "dep:egui", "dep:egui-mcp-client", "dep:egui-mcp-protocol", "dep:image", "egui/accesskit", "dep:accesskit", "dep:sha2", "dep:dirs", "dep:serde", "dep:serde_json", "dep:rosc"]
+luchs = ["dep:eframe", "dep:egui", "dep:egui-mcp-client", "dep:egui-mcp-protocol", "dep:image", "egui/accesskit", "dep:accesskit", "dep:sha2", "dep:dirs", "dep:serde", "dep:serde_json", "dep:rosc", "dep:lofty"]
 mcp = ["dep:rmcp", "dep:serde_json"]
 
 [[bin]]

@@ -6,6 +6,7 @@ use egui_mcp_client::McpClient;
 use egui_mcp_protocol::UiTree;
 use image::{ImageBuffer, ImageFormat, Rgba};
 
+use crate::media_library::VirtualUsb;
 use crate::{DjControllerView, TCNetClient};
 
 use super::analysis::AnalysisManager;
@@ -47,7 +48,7 @@ pub struct LuchsApp {
     state: LuchsState,
     waveform_puller: WaveformPuller,
     analysis: AnalysisManager,
-    media_dir: PathBuf,
+    library: VirtualUsb,
     bind_ip_label: String,
     mcp_client: McpClient,
     rt: tokio::runtime::Runtime,
@@ -71,6 +72,12 @@ impl LuchsApp {
     ) -> Self {
         let waveform_puller = WaveformPuller::new(client.runtime_handle());
         let analysis = AnalysisManager::new(script_dir);
+        let library = VirtualUsb::from_dir(media_dir.clone());
+        log::info!(
+            "luchs media library indexed: {} tracks under {:?}",
+            library.tracks.len(),
+            library.root
+        );
         let config = LuchsConfig::load();
         let osc_config = OscConfig::new();
         osc_config.update(
@@ -87,7 +94,7 @@ impl LuchsApp {
             state: LuchsState::default(),
             waveform_puller,
             analysis,
-            media_dir,
+            library,
             bind_ip_label,
             mcp_client,
             rt,
@@ -129,7 +136,7 @@ impl LuchsApp {
                 view,
                 &mut self.waveform_puller,
                 &mut self.analysis,
-                &self.media_dir,
+                &self.library,
                 &self.osc_sender,
                 self.config.forward_all_decks,
             );

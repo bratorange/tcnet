@@ -159,3 +159,8 @@ then verify that all functional elements of the gui work as expected and show me
 - the allin1 model lays in  ~/Python/all-in-one
 - There is a lot of potential for bugs in this project, so make sure to thoroughly test everything and report any issues found.
 - verify that all stays synchronized as this is currently the most common source of bugs
+
+Polishing
+- Currently the luchs uses the path as a heuristic for the track, while the simulator sends metadata. Also use the
+VirtualUsb struct in Luchs, to build an index on load like the simulator does it and then match the track by name
+and artist name

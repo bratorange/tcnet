@@ -1,11 +1,10 @@
-use std::path::Path;
 use std::time::Instant;
 
+use crate::media_library::VirtualUsb;
 use crate::{DjControllerView, LayerId};
 
 use super::analysis::{AnalysisEvent, AnalysisManager, AnalysisPriority};
 use super::deck_state::{DeckRole, DeckState};
-use super::media_resolver;
 use super::osc::{OscEvent, OscSender};
 use super::phrase_types::AnalysisState;
 use super::waveform_pull::{WaveformEvent, WaveformPuller};
@@ -42,7 +41,7 @@ impl LuchsState {
         view: &mut DjControllerView,
         puller: &mut WaveformPuller,
         analysis: &mut AnalysisManager,
-        media_dir: &Path,
+        library: &VirtualUsb,
         osc: &OscSender,
         forward_all_decks: bool,
     ) {
@@ -87,7 +86,10 @@ impl LuchsState {
             if snap.track_id == 0 {
                 continue;
             }
-            // Resolve once and cache on the deck.
+            // Resolve once and cache on the deck. Match against the indexed
+            // media library by (title, artist) — same primary keys the
+            // simulator uses to broadcast a track, so the match is exact
+            // when the same tags are present in the local files.
             if self.decks[i].audio_path.is_none() && !self.decks[i].audio_path_missing {
                 let title = if !snap.title.is_empty() {
                     snap.title.as_str()
@@ -96,15 +98,17 @@ impl LuchsState {
                 } else {
                     continue;
                 };
-                match media_resolver::resolve(media_dir, title) {
-                    Some(path) => {
-                        self.decks[i].audio_path = Some(path);
+                let artist = snap.artist.as_str();
+                match library.lookup(title, artist) {
+                    Some(info) => {
+                        self.decks[i].audio_path = Some(info.path.clone());
                     }
                     None => {
                         log::warn!(
-                            "luchs: no audio file for track {:?} in media_dir={:?}",
+                            "luchs: no audio file for track title={:?} artist={:?} in library root={:?}",
                             title,
-                            media_dir
+                            artist,
+                            library.root,
                         );
                         self.decks[i].audio_path_missing = true;
                     }
@@ -124,7 +128,14 @@ impl LuchsState {
                 if prev_state {
                     self.decks[i].analysis_state = AnalysisState::Queued;
                 }
-                analysis.submit(i, snap.track_id, path, priority);
+                // Cache key is derived from title+artist (metadata-based) so
+                // it's portable across machines / file moves.
+                let title = if !snap.title.is_empty() {
+                    snap.title.clone()
+                } else {
+                    snap.name.clone()
+                };
+                analysis.submit(i, snap.track_id, path, title, snap.artist.clone(), priority);
             }
         }
 
@@ -150,7 +161,6 @@ impl LuchsState {
         let Some(deck) = self.decks.get_mut(deck_idx) else {
             return;
         };
-        let layer_idx = deck.layer_idx;
 
         // Beat event — fires when the local beat counter advances. We prefer
         // the TCNet snapshot's beat_number when available, but fall back to a
@@ -175,7 +185,6 @@ impl LuchsState {
         // fires per spec, since segment_idx changes).
         if let Some((seg_idx, seg)) = deck.current_segment_with_index() {
             let key = (seg.kind, seg_idx);
-            let kind = seg.kind;
             if deck.last_emitted_segment != Some(key) {
                 osc.dispatch(OscEvent::Phrase {
                     segment_idx: seg_idx as i32,

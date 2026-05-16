@@ -18,8 +18,8 @@ use crate::node::tcnet_packet::{management_header, node_config_from_opt_in, opt_
 use crate::node::tcnet_packet::Data::{OptIn, OptOut};
 use crate::node::tcnet_packet::Data;
 use crate::node::tcnet_packet_serde::{
-    ArtworkFileData, BigWaveformData, BeatGridEntry, BeatGridHeader, CueData,
-    LayerId, NodeType, RequestDataType, SmallWaveformData,
+    ArtworkFileData, BigWaveformData, BeatGridEntry, BeatGridHeader,
+    LayerId, NodeType, RequestDataType,
 };
 use crate::ForeignNodeInfo;
 

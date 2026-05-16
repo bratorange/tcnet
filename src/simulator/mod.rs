@@ -1,4 +1,3 @@
-pub mod virtual_usb;
 pub mod audio;
 pub mod beatgrid_gen;
 pub mod cdj_deck;

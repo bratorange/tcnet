@@ -1,3 +1,11 @@
+//! Local audio file index shared by the simulator (for its track browser)
+//! and LUCHS (for matching TCNet-broadcast metadata to a local audio file).
+//!
+//! On construction, walks `--usb-dir` / `--media-dir` recursively, reads ID3
+//! / Vorbis / similar tags via lofty, and stores a `TrackInfo` per file. The
+//! resulting collection can be searched by title (substring) for the browser
+//! UI, or matched precisely by title + artist for LUCHS' analysis pipeline.
+
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -9,6 +17,11 @@ pub struct TrackInfo {
     pub bpm: Option<f32>,
 }
 
+/// Wraps a directory of audio files with their parsed metadata.
+///
+/// Historical name (`VirtualUsb`) reflects its original use in the simulator
+/// as a virtual USB stick for the CDJ browser. LUCHS uses the same type to
+/// build its title+artist → path index.
 pub struct VirtualUsb {
     pub root: PathBuf,
     pub tracks: Vec<TrackInfo>,
@@ -23,7 +36,9 @@ impl VirtualUsb {
 
     pub fn scan(&mut self) {
         self.tracks.clear();
-        if !self.root.exists() { return; }
+        if !self.root.exists() {
+            return;
+        }
         self.scan_dir(&self.root.clone());
         self.tracks.sort_by(|a, b| a.title.cmp(&b.title));
     }
@@ -41,11 +56,47 @@ impl VirtualUsb {
             }
         }
     }
+
+    /// Match a track by title (+ optional artist). Tries title+artist exact
+    /// match (case-insensitive) first, falls back to title-only exact, then
+    /// to title-as-substring on the title field (no filename heuristics).
+    /// Returns the first matching `TrackInfo`.
+    pub fn lookup(&self, title: &str, artist: &str) -> Option<&TrackInfo> {
+        let title_lc = title.trim().to_ascii_lowercase();
+        let artist_lc = artist.trim().to_ascii_lowercase();
+        if title_lc.is_empty() {
+            return None;
+        }
+
+        if !artist_lc.is_empty() {
+            if let Some(t) = self.tracks.iter().find(|t| {
+                t.title.eq_ignore_ascii_case(&title_lc)
+                    && t.artist.eq_ignore_ascii_case(&artist_lc)
+            }) {
+                return Some(t);
+            }
+        }
+
+        if let Some(t) = self
+            .tracks
+            .iter()
+            .find(|t| t.title.eq_ignore_ascii_case(&title_lc))
+        {
+            return Some(t);
+        }
+
+        self.tracks
+            .iter()
+            .find(|t| t.title.to_ascii_lowercase().contains(&title_lc))
+    }
 }
 
 fn is_audio_file(path: &Path) -> bool {
     matches!(
-        path.extension().and_then(|e| e.to_str()).map(str::to_lowercase).as_deref(),
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_lowercase)
+            .as_deref(),
         Some("mp3" | "flac" | "wav" | "aac" | "m4a" | "ogg")
     )
 }
@@ -54,7 +105,8 @@ fn read_track_info(path: PathBuf) -> Option<TrackInfo> {
     use lofty::prelude::*;
     use lofty::probe::Probe;
 
-    let stem = path.file_stem()
+    let stem = path
+        .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("Unknown")
         .to_owned();
@@ -68,7 +120,8 @@ fn read_track_info(path: PathBuf) -> Option<TrackInfo> {
         let (title, artist, bpm) = if let Some(tag) = tag {
             let title = tag.title().map(|s| s.to_string()).unwrap_or_else(|| stem.clone());
             let artist = tag.artist().map(|s| s.to_string()).unwrap_or_default();
-            let bpm = tag.get_string(&lofty::tag::ItemKey::Bpm)
+            let bpm = tag
+                .get_string(&lofty::tag::ItemKey::Bpm)
                 .and_then(|s| s.parse::<f32>().ok());
             (title, artist, bpm)
         } else {

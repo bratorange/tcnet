@@ -60,6 +60,8 @@ pub fn run(
                 stderr.trim()
             )));
         }
+    } else { 
+        info!("Using cached allin1 output: {}", json_path.display());
     }
 
     parse_json(&json_path)

@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use sha2::{Digest, Sha256};
 
@@ -9,17 +9,18 @@ pub fn cache_root() -> PathBuf {
         .join("luchs")
 }
 
-/// Stable cache key for a media file. Combines absolute path + file size so a
-/// file replaced in place with new audio gets a new key. Hex of the SHA-256
-/// prefix (16 bytes) — short enough for directory names but ~unique.
-pub fn key_for_file(path: &Path) -> String {
-    let size = std::fs::metadata(path)
-        .map(|m| m.len())
-        .unwrap_or(0);
-    let path_str = path.to_string_lossy();
+/// Stable cache key for a track, derived from its broadcast metadata (title +
+/// artist). Two files with the same title+artist tags share a cache entry —
+/// which is exactly what we want: a track moved between folders or re-encoded
+/// at the same metadata reuses its prior analysis output.
+///
+/// The key is normalised (trim, ASCII-lowercase) so cosmetic differences
+/// don't fragment the cache. Hex of the SHA-256 prefix (16 bytes).
+pub fn key_for_track(title: &str, artist: &str) -> String {
     let mut h = Sha256::new();
-    h.update(path_str.as_bytes());
-    h.update(&size.to_le_bytes());
+    h.update(title.trim().to_ascii_lowercase().as_bytes());
+    h.update(b"\x1f"); // unit separator — disambiguates "ab|" vs "a|b"
+    h.update(artist.trim().to_ascii_lowercase().as_bytes());
     let digest = h.finalize();
     let mut s = String::with_capacity(32);
     for b in &digest[..16] {

@@ -4,13 +4,13 @@ use crate::node::dj_controller::MixerSnapshot;
 use crate::node::tcnet_packet_serde::LayerId;
 use crate::simulator::audio::AudioEngine;
 use crate::simulator::cdj_deck::CDJDeck;
-use crate::simulator::virtual_usb::{TrackInfo, VirtualUsb};
 use crate::simulator::ui::{cdj_panel, mixer_panel};
 use crate::simulator::mcp::{SimBridge, SimCmd};
 use std::sync::{Arc, Mutex};
 use egui_mcp_client::McpClient;
 use egui_mcp_protocol::UiTree;
 use image::{ImageBuffer, Rgba, ImageFormat};
+use crate::media_library::{TrackInfo, VirtualUsb};
 
 /// egui plugin that captures the AccessKit tree from `output_hook`, which runs
 /// after `end_pass()` populates `platform_output.accesskit_update`.
