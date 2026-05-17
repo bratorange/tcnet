@@ -76,7 +76,9 @@ pub struct MixerSnapshot {
 impl MixerSnapshot {
     /// 1-based indices of channels routed to the headphone CUE A bus.
     pub fn cue_a_channels(&self) -> Vec<usize> {
-        self.channels.iter().enumerate()
+        self.channels
+            .iter()
+            .enumerate()
             .filter(|(_, ch)| ch.cue_a)
             .map(|(i, _)| i + 1)
             .collect()
@@ -84,7 +86,9 @@ impl MixerSnapshot {
 
     /// 1-based indices of channels whose fader is open (`fader_level > 0`).
     pub fn on_air_channels(&self) -> Vec<usize> {
-        self.channels.iter().enumerate()
+        self.channels
+            .iter()
+            .enumerate()
             .filter(|(_, ch)| ch.is_on())
             .map(|(i, _)| i + 1)
             .collect()
@@ -215,7 +219,10 @@ pub struct DjControllerState {
 impl Default for DjControllerState {
     fn default() -> Self {
         Self {
-            layers: LayerId::ALL.iter().map(|_| LayerSnapshot::default()).collect(),
+            layers: LayerId::ALL
+                .iter()
+                .map(|_| LayerSnapshot::default())
+                .collect(),
             mixer: MixerSnapshot::default(),
         }
     }
@@ -278,16 +285,9 @@ impl DjController {
     ) -> (Self, impl Future<Output = ()>) {
         let (packet_tx, packet_rx) = kanal::bounded::<Packet>(100);
         let (request_tx, request_rx) = kanal::bounded::<UserRequest>(16);
-        let (buf_input, buf_output) =
-            triple_buffer::triple_buffer(&DjControllerState::default());
+        let (buf_input, buf_output) = triple_buffer::triple_buffer(&DjControllerState::default());
 
-        let fut = dj_controller_task(
-            packet_rx,
-            request_rx,
-            outgoing_tx,
-            buf_input,
-            foreign_addr,
-        );
+        let fut = dj_controller_task(packet_rx, request_rx, outgoing_tx, buf_input, foreign_addr);
 
         let ctrl = DjController {
             packet_tx,
@@ -332,10 +332,18 @@ fn fire_timeout(pending: &mut Vec<PendingRequest>) {
         if pending[i].deadline <= now {
             let p = pending.swap_remove(i);
             match p.reply {
-                PendingReply::SmallWaveform(tx) => { let _ = tx.send(Err(TimeoutError)); }
-                PendingReply::BigWaveform(tx)   => { let _ = tx.send(Err(TimeoutError)); }
-                PendingReply::ArtworkFile(tx)   => { let _ = tx.send(Err(TimeoutError)); }
-                PendingReply::BeatGrid { reply, .. } => { let _ = reply.send(Err(TimeoutError)); }
+                PendingReply::SmallWaveform(tx) => {
+                    let _ = tx.send(Err(TimeoutError));
+                }
+                PendingReply::BigWaveform(tx) => {
+                    let _ = tx.send(Err(TimeoutError));
+                }
+                PendingReply::ArtworkFile(tx) => {
+                    let _ = tx.send(Err(TimeoutError));
+                }
+                PendingReply::BeatGrid { reply, .. } => {
+                    let _ = reply.send(Err(TimeoutError));
+                }
             }
         } else {
             i += 1;
@@ -367,7 +375,9 @@ async fn dj_controller_task(
     loop {
         // --- drain incoming packets ---
         let mut packets = Vec::new();
-        if packet_rx.drain_into(&mut packets).is_err() { break; }
+        if packet_rx.drain_into(&mut packets).is_err() {
+            break;
+        }
 
         for packet in packets {
             // check if this packet satisfies a pending request
@@ -461,14 +471,12 @@ async fn dj_controller_task(
                             }
 
                             // Are we done?
-                            let complete = if let PendingReply::BeatGrid {
-                                chunks, ..
-                            } = &pending[i].reply
-                            {
-                                !chunks.is_empty() && chunks.iter().all(|c| c.is_some())
-                            } else {
-                                false
-                            };
+                            let complete =
+                                if let PendingReply::BeatGrid { chunks, .. } = &pending[i].reply {
+                                    !chunks.is_empty() && chunks.iter().all(|c| c.is_some())
+                                } else {
+                                    false
+                                };
 
                             if complete {
                                 let p = pending.swap_remove(i);
@@ -508,7 +516,8 @@ async fn dj_controller_task(
 
         // write updated state to triple buffer; order matches LayerId::ALL
         buf_input.write(DjControllerState {
-            layers: LayerId::ALL.iter()
+            layers: LayerId::ALL
+                .iter()
                 .map(|id| layers.get(id).cloned().unwrap_or_default())
                 .collect(),
             mixer: mixer.clone(),
@@ -516,7 +525,9 @@ async fn dj_controller_task(
 
         // --- drain user requests ---
         let mut requests = Vec::new();
-        if request_rx.drain_into(&mut requests).is_err() { break; }
+        if request_rx.drain_into(&mut requests).is_err() {
+            break;
+        }
 
         for req in requests {
             match req {
@@ -603,16 +614,34 @@ fn apply_packet(
     match packet.data {
         Data::Status(s) => {
             let sources = [
-                s.layer_1_source, s.layer_2_source, s.layer_3_source, s.layer_4_source,
-                s.layer_a_source, s.layer_b_source, s.layer_m_source, s.layer_c_source,
+                s.layer_1_source,
+                s.layer_2_source,
+                s.layer_3_source,
+                s.layer_4_source,
+                s.layer_a_source,
+                s.layer_b_source,
+                s.layer_m_source,
+                s.layer_c_source,
             ];
             let track_ids = [
-                s.layer_1_track_id, s.layer_2_track_id, s.layer_3_track_id, s.layer_4_track_id,
-                s.layer_a_track_id, s.layer_b_track_id, s.layer_m_track_id, s.layer_c_track_id,
+                s.layer_1_track_id,
+                s.layer_2_track_id,
+                s.layer_3_track_id,
+                s.layer_4_track_id,
+                s.layer_a_track_id,
+                s.layer_b_track_id,
+                s.layer_m_track_id,
+                s.layer_c_track_id,
             ];
             let names = [
-                &s.layer_1_name, &s.layer_2_name, &s.layer_3_name, &s.layer_4_name,
-                &s.layer_a_name, &s.layer_b_name, &s.layer_m_name, &s.layer_c_name,
+                &s.layer_1_name,
+                &s.layer_2_name,
+                &s.layer_3_name,
+                &s.layer_4_name,
+                &s.layer_a_name,
+                &s.layer_b_name,
+                &s.layer_m_name,
+                &s.layer_c_name,
             ];
             for id in LayerId::ALL {
                 let i = id.index();
@@ -643,28 +672,58 @@ fn apply_packet(
 
         Data::Time(t) => {
             let cur_times = [
-                t.l1_time, t.l2_time, t.l3_time, t.l4_time,
-                t.la_time, t.lb_time, t.lm_time, t.lc_time,
+                t.l1_time, t.l2_time, t.l3_time, t.l4_time, t.la_time, t.lb_time, t.lm_time,
+                t.lc_time,
             ];
             let tot_times = [
-                t.l1_total_time, t.l2_total_time, t.l3_total_time, t.l4_total_time,
-                t.la_total_time, t.lb_total_time, t.lm_total_time, t.lc_total_time,
+                t.l1_total_time,
+                t.l2_total_time,
+                t.l3_total_time,
+                t.l4_total_time,
+                t.la_total_time,
+                t.lb_total_time,
+                t.lm_total_time,
+                t.lc_total_time,
             ];
             let states = [
-                t.l1_layer_state, t.l2_layer_state, t.l3_layer_state, t.l4_layer_state,
-                t.la_layer_state, t.lb_layer_state, t.lm_layer_state, t.lc_layer_state,
+                t.l1_layer_state,
+                t.l2_layer_state,
+                t.l3_layer_state,
+                t.l4_layer_state,
+                t.la_layer_state,
+                t.lb_layer_state,
+                t.lm_layer_state,
+                t.lc_layer_state,
             ];
             let on_air = [
-                t.l1_on_air, t.l2_on_air, t.l3_on_air, t.l4_on_air,
-                t.la_on_air, t.lb_on_air, t.lm_on_air, t.lc_on_air,
+                t.l1_on_air,
+                t.l2_on_air,
+                t.l3_on_air,
+                t.l4_on_air,
+                t.la_on_air,
+                t.lb_on_air,
+                t.lm_on_air,
+                t.lc_on_air,
             ];
             let beat_markers = [
-                t.l1_beat_marker, t.l2_beat_marker, t.l3_beat_marker, t.l4_beat_marker,
-                t.la_beat_marker, t.lb_beat_marker, t.lm_beat_marker, t.lc_beat_marker,
+                t.l1_beat_marker,
+                t.l2_beat_marker,
+                t.l3_beat_marker,
+                t.l4_beat_marker,
+                t.la_beat_marker,
+                t.lb_beat_marker,
+                t.lm_beat_marker,
+                t.lc_beat_marker,
             ];
             let timecodes = [
-                &t.l1_timecode, &t.l2_timecode, &t.l3_timecode, &t.l4_timecode,
-                &t.la_timecode, &t.lb_timecode, &t.lm_timecode, &t.lc_timecode,
+                &t.l1_timecode,
+                &t.l2_timecode,
+                &t.l3_timecode,
+                &t.l4_timecode,
+                &t.la_timecode,
+                &t.lb_timecode,
+                &t.lm_timecode,
+                &t.lc_timecode,
             ];
 
             for id in LayerId::ALL {
@@ -677,9 +736,11 @@ fn apply_packet(
                 snap.beat_marker = beat_markers[i];
 
                 let tc = timecodes[i];
-                snap.smpte_mode = SmpteMode::from_u8(
-                    if tc.smpte_mode == 0 { t.smpte_mode } else { tc.smpte_mode },
-                );
+                snap.smpte_mode = SmpteMode::from_u8(if tc.smpte_mode == 0 {
+                    t.smpte_mode
+                } else {
+                    tc.smpte_mode
+                });
                 snap.tc_state = tc.state;
                 snap.tc_hours = tc.hours;
                 snap.tc_minutes = tc.minutes;

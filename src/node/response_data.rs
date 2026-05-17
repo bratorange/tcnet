@@ -1,5 +1,5 @@
-use std::sync::Mutex;
 use crate::node::tcnet_packet::Data;
+use std::sync::Mutex;
 
 /// Per-layer pre-built response packets and live state snapshots.
 #[derive(Default)]
@@ -15,7 +15,6 @@ pub(crate) struct LayerResponseData {
     pub last_meta: Option<Data>,
 }
 
-
 pub(crate) struct ResponseDataStore {
     pub layers: Vec<LayerResponseData>,
     pub last_mixer: Option<Data>,
@@ -24,7 +23,10 @@ pub(crate) struct ResponseDataStore {
 impl Default for ResponseDataStore {
     fn default() -> Self {
         let layers = (0..8).map(|_| LayerResponseData::default()).collect();
-        Self { layers, last_mixer: None }
+        Self {
+            layers,
+            last_mixer: None,
+        }
     }
 }
 

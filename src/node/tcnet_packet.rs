@@ -1,8 +1,8 @@
 use crate::into_ascii;
 use crate::node::dispatcher::timestamp_micros;
 use crate::node::tcnet_packet::Data::*;
-use crate::protocol::*;
 use crate::node::{ApplicationConfig, DynamicNodeState};
+use crate::protocol::*;
 use deku::prelude::Writer;
 use deku::{DekuContainerRead, DekuContainerWrite, DekuError, DekuWrite, DekuWriter};
 use std::fmt::Debug;
@@ -10,8 +10,7 @@ use std::io::{Seek, Write};
 use std::net::{Ipv4Addr, SocketAddrV4};
 
 #[derive(Clone, DekuWrite)]
-pub struct Packet
-{
+pub struct Packet {
     pub(crate) header: ManagementHeader,
     pub(crate) data: Data,
 }
@@ -25,29 +24,29 @@ pub enum SerdeError {
 
 impl Packet {
     pub fn deserialize_packet(bytes: &[u8]) -> Result<Self, SerdeError> {
-        let (remaining, header) = ManagementHeader::from_bytes((bytes, 0))
-            .map_err(SerdeError::InvalidHeader)?;
+        let (remaining, header) =
+            ManagementHeader::from_bytes((bytes, 0)).map_err(SerdeError::InvalidHeader)?;
         let packet_type = header.message_type;
 
         let data = match packet_type {
             2 => {
-                let (_, inner) = OptInData::from_bytes(remaining)
-                    .map_err(SerdeError::InvalidData)?;
+                let (_, inner) =
+                    OptInData::from_bytes(remaining).map_err(SerdeError::InvalidData)?;
                 OptIn(inner)
             }
             3 => {
-                let (_, inner) = OptOutData::from_bytes(remaining)
-                    .map_err(SerdeError::InvalidData)?;
+                let (_, inner) =
+                    OptOutData::from_bytes(remaining).map_err(SerdeError::InvalidData)?;
                 OptOut(inner)
             }
             5 => {
-                let (_, inner) = StatusData::from_bytes(remaining)
-                    .map_err(SerdeError::InvalidData)?;
+                let (_, inner) =
+                    StatusData::from_bytes(remaining).map_err(SerdeError::InvalidData)?;
                 Status(inner)
             }
             10 => {
-                let (_, inner) = TimeSyncData::from_bytes(remaining)
-                    .map_err(SerdeError::InvalidData)?;
+                let (_, inner) =
+                    TimeSyncData::from_bytes(remaining).map_err(SerdeError::InvalidData)?;
                 TimeSync(inner)
             }
             13 => {
@@ -56,43 +55,48 @@ impl Packet {
                 ErrorNotification(inner)
             }
             20 => {
-                let (_, inner) = RequestData::from_bytes(remaining)
-                    .map_err(SerdeError::InvalidData)?;
+                let (_, inner) =
+                    RequestData::from_bytes(remaining).map_err(SerdeError::InvalidData)?;
                 Request(inner)
             }
             30 => {
-                let (_, inner) = AppSpecificData::from_bytes(remaining)
-                    .map_err(SerdeError::InvalidData)?;
+                let (_, inner) =
+                    AppSpecificData::from_bytes(remaining).map_err(SerdeError::InvalidData)?;
                 AppSpecific(inner)
             }
             101 => {
-                let (_, inner) = ControlData::from_bytes(remaining)
-                    .map_err(SerdeError::InvalidData)?;
+                let (_, inner) =
+                    ControlData::from_bytes(remaining).map_err(SerdeError::InvalidData)?;
                 Control(inner)
             }
             128 => {
-                let (_, inner) = TextData::from_bytes(remaining)
-                    .map_err(SerdeError::InvalidData)?;
+                let (_, inner) =
+                    TextData::from_bytes(remaining).map_err(SerdeError::InvalidData)?;
                 Text(inner)
             }
             132 => {
-                let (_, inner) = KeyboardData::from_bytes(remaining)
-                    .map_err(SerdeError::InvalidData)?;
+                let (_, inner) =
+                    KeyboardData::from_bytes(remaining).map_err(SerdeError::InvalidData)?;
                 Keyboard(inner)
             }
             200 => {
                 // Data type is the first byte of the remaining buffer
-                let data_type = *remaining.0.first()
-                    .ok_or(SerdeError::InvalidData(DekuError::Parse("missing data type byte".into())))?;
+                let data_type =
+                    *remaining
+                        .0
+                        .first()
+                        .ok_or(SerdeError::InvalidData(DekuError::Parse(
+                            "missing data type byte".into(),
+                        )))?;
                 match data_type {
                     2 => {
-                        let (_, inner) = MetricsData::from_bytes(remaining)
-                            .map_err(SerdeError::InvalidData)?;
+                        let (_, inner) =
+                            MetricsData::from_bytes(remaining).map_err(SerdeError::InvalidData)?;
                         Metrics(inner)
                     }
                     4 => {
-                        let (_, inner) = MetaData::from_bytes(remaining)
-                            .map_err(SerdeError::InvalidData)?;
+                        let (_, inner) =
+                            MetaData::from_bytes(remaining).map_err(SerdeError::InvalidData)?;
                         Meta(inner)
                     }
                     8 => {
@@ -101,8 +105,8 @@ impl Packet {
                         BeatGrid(inner)
                     }
                     12 => {
-                        let (_, inner) = CueData::from_bytes(remaining)
-                            .map_err(SerdeError::InvalidData)?;
+                        let (_, inner) =
+                            CueData::from_bytes(remaining).map_err(SerdeError::InvalidData)?;
                         Cue(inner)
                     }
                     16 => {
@@ -121,16 +125,16 @@ impl Packet {
                         ArtworkFile(inner)
                     }
                     150 => {
-                        let (_, inner) = MixerData::from_bytes(remaining)
-                            .map_err(SerdeError::InvalidData)?;
+                        let (_, inner) =
+                            MixerData::from_bytes(remaining).map_err(SerdeError::InvalidData)?;
                         Mixer(inner)
                     }
                     _ => return Err(SerdeError::MessageTypeNotImplemented),
                 }
             }
             254 => {
-                let (_, inner) = TimePacketData::from_bytes(remaining)
-                    .map_err(SerdeError::InvalidData)?;
+                let (_, inner) =
+                    TimePacketData::from_bytes(remaining).map_err(SerdeError::InvalidData)?;
                 Time(inner)
             }
             _ => return Err(SerdeError::MessageTypeNotImplemented),
@@ -141,14 +145,18 @@ impl Packet {
 
 impl Debug for Packet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Packet\n {{ Header: {:?}\n\nData:\n {:?} }}", self.header, self.data)
+        write!(
+            f,
+            "Packet\n {{ Header: {:?}\n\nData:\n {:?} }}",
+            self.header, self.data
+        )
     }
 }
 
 pub(crate) fn node_config_from_opt_in(
     src_addr: Ipv4Addr,
     header: &ManagementHeader,
-    data: &OptInData
+    data: &OptInData,
 ) -> ApplicationConfig {
     ApplicationConfig {
         node_id: header.node_id,
@@ -164,8 +172,12 @@ pub(crate) fn node_config_from_opt_in(
     }
 }
 
-pub(crate) fn management_header(app_config: &ApplicationConfig, message_type: u8, seq: u8) -> ManagementHeader{
-    ManagementHeader{
+pub(crate) fn management_header(
+    app_config: &ApplicationConfig,
+    message_type: u8,
+    seq: u8,
+) -> ManagementHeader {
+    ManagementHeader {
         node_id: app_config.node_id,
         protocol_version_major: 3,
         protocol_version_minor: 6,
@@ -179,9 +191,13 @@ pub(crate) fn management_header(app_config: &ApplicationConfig, message_type: u8
     }
 }
 
-pub(crate) fn opt_in_packet(app_config: &ApplicationConfig, node_state: &DynamicNodeState, seq: u8) -> Result<Vec<u8>, DekuError> {
+pub(crate) fn opt_in_packet(
+    app_config: &ApplicationConfig,
+    node_state: &DynamicNodeState,
+    seq: u8,
+) -> Result<Vec<u8>, DekuError> {
     let header = management_header(app_config, 2, seq);
-    let data = OptInData{
+    let data = OptInData {
         node_count: (node_state.discovered_nodes.len() + 1) as u16,
         node_listener_port: app_config.address.port(),
         uptime: node_state.uptime,
@@ -250,7 +266,7 @@ pub enum Data {
     Time(TimePacketData),
 }
 
-impl DekuWriter for Data{
+impl DekuWriter for Data {
     fn to_writer<W: Write + Seek>(&self, writer: &mut Writer<W>, ctx: ()) -> Result<(), DekuError> {
         match self {
             OptIn(data) => data.to_writer(writer, ctx),

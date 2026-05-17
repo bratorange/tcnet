@@ -77,28 +77,76 @@
 //! * [`view`] — read-only consumer view of a discovered foreign node.
 //!
 //! Most users only need the types re-exported at the crate root.
+//!
+//! ## Implementation status
+//!
+//! This crate covers the parts of TCNet v3.6 needed to observe and impersonate
+//! a Pioneer-style DJ controller on the network. It is **not** a full
+//! reference implementation of every message type defined in the spec.
+//!
+//! **Implemented:**
+//!
+//! * Discovery — `OptIn` broadcasts every second on UDP 60000, listening for
+//!   peer `OptIn` / `OptOut`, 10-second timeout for stale nodes.
+//! * Foreign-node observation — `Status`, `Metrics`, `Meta`, `Mixer` and
+//!   `Time` packets are decoded and merged into [`LayerSnapshot`] /
+//!   [`MixerSnapshot`], published through a triple buffer to
+//!   [`DjControllerView`].
+//! * On-demand requests from a [`DjControllerView`] — `SmallWaveform`,
+//!   `BigWaveform`, `BeatGrid` (with multi-packet reassembly) and
+//!   `LowResArtworkFile`, each with a 5-second timeout.
+//! * Active broadcasting via [`ActiveDJNode`] — periodic `Time` (20 ms),
+//!   `Status` (1 s) and per-layer `Metrics` (50 ms while playing) emission,
+//!   plus on-demand replies to peer `RequestData` packets from a pre-built
+//!   response cache (`SmallWaveform`, `BigWaveform`, `BeatGrid`, `Cue`,
+//!   `Artwork`, `Mixer`, `Metrics`, `Meta`).
+//!
+//! **Partial / not implemented:**
+//!
+//! * **No `OptOut` is emitted** when an `ActiveDJNode` is dropped — peers
+//!   currently rely on the 10-second silence timeout to drop us. Incoming
+//!   `OptOut` from peers *is* handled.
+//! * **`TimeSync`** (message type 10) — struct defined for parsing, but the
+//!   handshake is not performed; this crate relies on local system time and
+//!   the per-packet microsecond timestamp.
+//! * **`ErrorNotification`** (message type 13) — struct defined, never sent
+//!   or surfaced to the user when received.
+//! * **`Control` / `Text` / `Keyboard` / `AppSpecific`** (message types 101 /
+//!   128 / 132 / 30 / 213) — structs defined but neither emitted nor surfaced;
+//!   incoming packets are deserialised and dropped.
+//! * **Authentication** ([`NodeOptions::NEED_AUTHENTICATION`]) — no
+//!   handshake implemented; this crate always operates as an unauthenticated
+//!   peer.
+//! * **`LayerStatus` and `AutoMasterMode`** are placeholder enums with a
+//!   single variant — the spec leaves these mostly unspecified at v3.6.
+//! * **Master-election arbitration** — `NodeType` is reported faithfully but
+//!   the `Auto`/`Master`/`Slave` election logic is not driven by this crate.
+//! * **`MixerData` round-trip** — most fields are surfaced through
+//!   [`MixerSnapshot`], but a handful of less-common send-FX / send-return
+//!   bytes are read from the wire without a dedicated snapshot field.
+//!
+//! PRs welcome.
 
-use crate::node::dispatcher::{start_node, Dispatcher};
+use crate::node::dispatcher::{Dispatcher, start_node};
 use crate::node::dj_controller::OutgoingRequest;
 use crate::node::response_data::{ResponseDataStore, SharedResponseData};
 use crate::node::tcnet_packet::Data;
-use crate::protocol::NodeId;
 use crate::node::{DynamicNodeState, ForeignNode};
+use crate::protocol::NodeId;
 use std::net::SocketAddrV4;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::AtomicU16;
+use std::sync::{Arc, Mutex};
 use tokio::runtime::Runtime;
 use tokio::sync::RwLock;
 
-pub mod protocol;
-pub mod view;
 pub mod active_node;
 mod node;
+pub mod protocol;
 #[cfg(test)]
 mod tests;
+pub mod view;
 
 pub use active_node::{ActiveDJNode, TrackMeta};
-pub use view::{DjControllerView, WaveformRequester};
 pub use node::ApplicationConfig;
 pub use node::dj_controller::{
     ChannelSnapshot, DjControllerState, LayerSnapshot, MixerSnapshot, TimeoutError,
@@ -107,6 +155,7 @@ pub use protocol::{
     AsciiString, BeatGridEntry, BeatGridHeader, BigWaveformData, Bpm, LayerId, LayerState,
     NodeOptions, NodeType, RequestDataType, SmallWaveformData, SmpteMode, Speed,
 };
+pub use view::{DjControllerView, WaveformRequester};
 
 /// Snapshot of a foreign node discovered on the network through TCNet OptIn
 /// broadcasts. Returned by [`TCNetClient::active_nodes`].
@@ -232,8 +281,11 @@ impl TCNetClient {
     pub fn get_controller_view(&self, addr: SocketAddrV4) -> Option<DjControllerView> {
         self._runtime.block_on(async {
             let mut state = self.dispatcher.state.write().await;
-            let ctrl = state.discovered_nodes.get_mut(&addr)?
-                .dj_controller.as_mut()?;
+            let ctrl = state
+                .discovered_nodes
+                .get_mut(&addr)?
+                .dj_controller
+                .as_mut()?;
             let buf = ctrl.buf_output.take()?;
             Some(DjControllerView::new(buf, ctrl.request_tx.clone()))
         })
@@ -247,9 +299,10 @@ impl TCNetClient {
             let mut state = self.dispatcher.state.write().await;
             for node in state.discovered_nodes.values_mut() {
                 if let Some(ctrl) = node.dj_controller.as_mut()
-                    && let Some(buf) = ctrl.buf_output.take() {
-                        return Some(DjControllerView::new(buf, ctrl.request_tx.clone()));
-                    }
+                    && let Some(buf) = ctrl.buf_output.take()
+                {
+                    return Some(DjControllerView::new(buf, ctrl.request_tx.clone()));
+                }
             }
             None
         })

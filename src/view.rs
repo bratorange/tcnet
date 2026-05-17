@@ -5,9 +5,13 @@
 //! Reads are lock-free (backed by a triple buffer); on-demand requests for
 //! waveform / beat-grid / artwork data are async and time out after 5 seconds.
 
+use crate::node::dj_controller::{
+    DjControllerState, LayerSnapshot, MixerSnapshot, TimeoutError, UserRequest,
+};
+use crate::protocol::{
+    ArtworkFileData, BeatGridHeader, BigWaveformData, LayerId, SmallWaveformData,
+};
 use tokio::sync::oneshot;
-use crate::node::dj_controller::{DjControllerState, LayerSnapshot, MixerSnapshot, TimeoutError, UserRequest};
-use crate::protocol::{ArtworkFileData, BeatGridHeader, BigWaveformData, LayerId, SmallWaveformData};
 
 /// Send-clonable handle for issuing waveform / beat-grid / artwork requests
 /// from background threads.
@@ -21,7 +25,9 @@ pub struct WaveformRequester {
 
 impl Clone for WaveformRequester {
     fn clone(&self) -> Self {
-        Self { request_tx: self.request_tx.clone() }
+        Self {
+            request_tx: self.request_tx.clone(),
+        }
     }
 }
 
@@ -57,10 +63,7 @@ impl WaveformRequester {
 
     /// Request the beat grid for `layer`. The multi-packet response is
     /// reassembled internally before the future resolves. Times out after 5 s.
-    pub async fn request_beat_grid(
-        &self,
-        layer: LayerId,
-    ) -> Result<BeatGridHeader, TimeoutError> {
+    pub async fn request_beat_grid(&self, layer: LayerId) -> Result<BeatGridHeader, TimeoutError> {
         let (tx, rx) = oneshot::channel();
         self.request_tx
             .send(UserRequest::BeatGrid { layer, reply: tx })
@@ -135,10 +138,7 @@ impl DjControllerView {
     /// Request the beat grid for `layer`. The multi-packet response is
     /// reassembled into a single [`BeatGridHeader`] (with the full payload in
     /// its `payload` field) before the future resolves. Times out after 5 s.
-    pub async fn request_beat_grid(
-        &self,
-        layer: LayerId,
-    ) -> Result<BeatGridHeader, TimeoutError> {
+    pub async fn request_beat_grid(&self, layer: LayerId) -> Result<BeatGridHeader, TimeoutError> {
         let (tx, rx) = oneshot::channel();
         self.request_tx
             .send(UserRequest::BeatGrid { layer, reply: tx })
@@ -149,7 +149,9 @@ impl DjControllerView {
     /// Return a Send + clonable handle for issuing waveform / beat-grid /
     /// artwork requests from background threads without holding `&mut self`.
     pub fn waveform_requester(&self) -> WaveformRequester {
-        WaveformRequester { request_tx: self.request_tx.clone() }
+        WaveformRequester {
+            request_tx: self.request_tx.clone(),
+        }
     }
 
     /// Request the low-resolution artwork JPEG for `layer`. Times out after 5 s.

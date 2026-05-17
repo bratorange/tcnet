@@ -2,10 +2,10 @@ use crate::into_ascii;
 use crate::protocol::{AsciiString, NodeId, NodeOptions, NodeType};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddrV4};
-pub(crate) mod dj_controller;
-pub(crate) mod tcnet_packet;
 pub(crate) mod dispatcher;
+pub(crate) mod dj_controller;
 pub(crate) mod response_data;
+pub(crate) mod tcnet_packet;
 
 use crate::node::dj_controller::DjController;
 

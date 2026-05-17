@@ -1,26 +1,26 @@
+use crate::ForeignNodeInfo;
+use crate::node::dj_controller::{DjController, OutgoingRequest};
+use crate::node::response_data::SharedResponseData;
+use crate::node::tcnet_packet::Data;
+use crate::node::tcnet_packet::Data::{OptIn, OptOut};
+use crate::node::tcnet_packet::{
+    Packet, management_header, node_config_from_opt_in, opt_in_packet,
+};
+use crate::node::{ApplicationConfig, DynamicNodeState, ForeignNode};
+use crate::protocol::{LayerId, NodeType, RequestDataType};
+use deku::DekuContainerWrite;
+use getifs::best_local_ipv4_addrs;
+use log::{error, info, trace, warn};
 use std::collections::HashSet;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use deku::DekuContainerWrite;
 use tokio::net::UdpSocket;
-use log::{error, info, trace, warn};
-use tokio::time::interval;
 use tokio::spawn;
 use tokio::sync::RwLock;
-use getifs::best_local_ipv4_addrs;
-use crate::node::{ApplicationConfig, DynamicNodeState, ForeignNode};
-use crate::node::dj_controller::{DjController, OutgoingRequest};
-use crate::node::response_data::SharedResponseData;
-use crate::node::tcnet_packet::{management_header, node_config_from_opt_in, opt_in_packet, Packet};
-use crate::node::tcnet_packet::Data::{OptIn, OptOut};
-use crate::node::tcnet_packet::Data;
-use crate::protocol::{
-    LayerId, NodeType, RequestDataType,
-};
-use crate::ForeignNodeInfo;
+use tokio::time::interval;
 
 pub struct Dispatcher {
     pub(crate) node_config: ApplicationConfig,
@@ -43,7 +43,11 @@ pub struct Dispatcher {
 
 /// Try to bind a UDP socket at `preferred_port`, incrementing until a free port is found.
 /// Enables broadcast if `enable_broadcast` is set.
-async fn bind_with_fallback(ip: Ipv4Addr, preferred_port: u16, enable_broadcast: bool) -> (UdpSocket, u16) {
+async fn bind_with_fallback(
+    ip: Ipv4Addr,
+    preferred_port: u16,
+    enable_broadcast: bool,
+) -> (UdpSocket, u16) {
     let mut port = preferred_port;
     loop {
         match UdpSocket::bind(SocketAddrV4::new(ip, port)).await {
@@ -58,7 +62,10 @@ async fn bind_with_fallback(ip: Ipv4Addr, preferred_port: u16, enable_broadcast:
                 return (socket, actual);
             }
             Err(_) if port < 65_534 => port += 1,
-            Err(e) => panic!("Could not bind any port starting from {}: {}", preferred_port, e),
+            Err(e) => panic!(
+                "Could not bind any port starting from {}: {}",
+                preferred_port, e
+            ),
         }
     }
 }
@@ -77,7 +84,9 @@ pub async fn start_node(dispatcher: Arc<Dispatcher>) {
     let broadcast_socket2 = Arc::new(s);
 
     let (s, unicast_port) = bind_with_fallback(ip, dispatcher.bind_address.port(), false).await;
-    dispatcher.actual_unicast_port.store(unicast_port, Ordering::Relaxed);
+    dispatcher
+        .actual_unicast_port
+        .store(unicast_port, Ordering::Relaxed);
     let unicast_socket = Arc::new(s);
 
     trace!("Starting network processing");
@@ -91,14 +100,25 @@ pub async fn start_node(dispatcher: Arc<Dispatcher>) {
     // matches the OptIn source, keeping all packets under one discovery key.
     spawn(send(dispatcher.clone(), broadcast_socket.clone()));
     spawn(timeout_foreign_nodes(dispatcher.clone()));
-    spawn(active_broadcast(dispatcher.clone(), broadcast_socket.clone(), time_broadcast_socket.clone()));
+    spawn(active_broadcast(
+        dispatcher.clone(),
+        broadcast_socket.clone(),
+        time_broadcast_socket.clone(),
+    ));
 }
 
 fn is_dj_packet(data: &Data) -> bool {
-    matches!(data,
-        Data::Status(_) | Data::Metrics(_) | Data::BeatGrid(_) | Data::Cue(_)
-        | Data::SmallWaveform(_) | Data::BigWaveform(_) | Data::Mixer(_)
-        | Data::ArtworkFile(_) | Data::Time(_)
+    matches!(
+        data,
+        Data::Status(_)
+            | Data::Metrics(_)
+            | Data::BeatGrid(_)
+            | Data::Cue(_)
+            | Data::SmallWaveform(_)
+            | Data::BigWaveform(_)
+            | Data::Mixer(_)
+            | Data::ArtworkFile(_)
+            | Data::Time(_)
     )
 }
 
@@ -106,7 +126,9 @@ fn publish_nodes_snapshot(
     state: &DynamicNodeState,
     nodes_input: &Arc<Mutex<triple_buffer::Input<Vec<ForeignNodeInfo>>>>,
 ) {
-    let snapshot: Vec<ForeignNodeInfo> = state.discovered_nodes.values()
+    let snapshot: Vec<ForeignNodeInfo> = state
+        .discovered_nodes
+        .values()
         .map(ForeignNodeInfo::from)
         .collect();
     nodes_input.lock().unwrap().write(snapshot);
@@ -131,15 +153,19 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
 
                         match &packet.data {
                             OptIn(opt_in_data) => {
-                                let node_config = node_config_from_opt_in(src_ip, &packet.header, opt_in_data);
+                                let node_config =
+                                    node_config_from_opt_in(src_ip, &packet.header, opt_in_data);
                                 let mut state = dispatcher.state.write().await;
-                                let node = state.discovered_nodes.entry(src_addr)
-                                    .or_insert(ForeignNode {
-                                        last_seen: 0,
-                                        address: node_config.address,
-                                        config: node_config,
-                                        dj_controller: None,
-                                    });
+                                let node =
+                                    state
+                                        .discovered_nodes
+                                        .entry(src_addr)
+                                        .or_insert(ForeignNode {
+                                            last_seen: 0,
+                                            address: node_config.address,
+                                            config: node_config,
+                                            dj_controller: None,
+                                        });
                                 node.last_seen = timestamp_secs();
                                 // Update address/config on each OptIn in case port changed.
                                 node.address = node_config.address;
@@ -151,7 +177,10 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
                                 let mut state = dispatcher.state.write().await;
                                 let removed = state.discovered_nodes.remove(&src_addr);
                                 if removed.is_none() {
-                                    warn!("Node {} has opted out despite not being part of the network (anymore)", src_ip);
+                                    warn!(
+                                        "Node {} has opted out despite not being part of the network (anymore)",
+                                        src_ip
+                                    );
                                 } else {
                                     info!("Node {} has opted out of the network", src_ip);
                                 }
@@ -161,20 +190,28 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
                             Data::Request(req) => {
                                 let (dest, packets) = {
                                     let state = dispatcher.state.read().await;
-                                    let dest = state.discovered_nodes.get(&src_addr)
+                                    let dest = state
+                                        .discovered_nodes
+                                        .get(&src_addr)
                                         .or_else(|| {
-                                            state.discovered_nodes.iter()
+                                            state
+                                                .discovered_nodes
+                                                .iter()
                                                 .find(|(k, _)| *k.ip() == src_ip)
                                                 .map(|(_, v)| v)
                                         })
                                         .map(|n| n.address)
                                         .unwrap_or(SocketAddrV4::new(src_ip, 65_023));
                                     let rd = dispatcher.response_data.lock().unwrap();
-                                    let packets = build_request_response(req.data_type, req.layer, &rd);
+                                    let packets =
+                                        build_request_response(req.data_type, req.layer, &rd);
                                     (dest, packets)
                                 };
                                 for pkt in packets {
-                                    let _ = dispatcher.outgoing_tx.try_send(OutgoingRequest { destination: dest, data: pkt });
+                                    let _ = dispatcher.outgoing_tx.try_send(OutgoingRequest {
+                                        destination: dest,
+                                        data: pkt,
+                                    });
                                 }
                             }
 
@@ -191,17 +228,20 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
                             // (source port 60000), preventing spurious duplicate entries.
                             let key = if state.discovered_nodes.contains_key(&src_addr) {
                                 src_addr
-                            } else if let Some(&k) = state.discovered_nodes.keys()
-                                .find(|k| *k.ip() == src_ip)
+                            } else if let Some(&k) =
+                                state.discovered_nodes.keys().find(|k| *k.ip() == src_ip)
                             {
                                 k
                             } else {
                                 src_addr
                             };
-                            let node_addr = state.discovered_nodes.get(&key)
+                            let node_addr = state
+                                .discovered_nodes
+                                .get(&key)
                                 .map(|n| n.address)
                                 .unwrap_or(SocketAddrV4::new(src_ip, 65_023));
-                            state.discovered_nodes
+                            state
+                                .discovered_nodes
                                 .entry(key)
                                 .and_modify(|foreign_node| {
                                     if foreign_node.dj_controller.is_none() {
@@ -260,30 +300,16 @@ fn build_request_response(
     let ld = &rd.layers[idx];
 
     match data_type {
-        RequestDataType::MetricsData => {
-            ld.last_metrics.clone().into_iter().collect()
-        }
-        RequestDataType::MetaData => {
-            ld.last_meta.clone().into_iter().collect()
-        }
-        RequestDataType::BeatGridData => {
-            ld.beat_grid_packets.clone()
-        }
-        RequestDataType::CueData => {
-            ld.cue_packet.clone().into_iter().collect()
-        }
+        RequestDataType::MetricsData => ld.last_metrics.clone().into_iter().collect(),
+        RequestDataType::MetaData => ld.last_meta.clone().into_iter().collect(),
+        RequestDataType::BeatGridData => ld.beat_grid_packets.clone(),
+        RequestDataType::CueData => ld.cue_packet.clone().into_iter().collect(),
         RequestDataType::SmallWaveformData => {
             ld.small_waveform_packet.clone().into_iter().collect()
         }
-        RequestDataType::LargeWaveformData => {
-            ld.big_waveform_packets.clone()
-        }
-        RequestDataType::LowResArtworkFile => {
-            ld.artwork_packets.clone()
-        }
-        RequestDataType::MixerData => {
-            rd.last_mixer.clone().into_iter().collect()
-        }
+        RequestDataType::LargeWaveformData => ld.big_waveform_packets.clone(),
+        RequestDataType::LowResArtworkFile => ld.artwork_packets.clone(),
+        RequestDataType::MixerData => rd.last_mixer.clone().into_iter().collect(),
     }
 }
 
@@ -301,7 +327,10 @@ async fn send(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) {
                 let mut state = dispatcher.state.write().await;
                 let seq = state.current_seq;
                 let header = management_header(&dispatcher.node_config, msg_type_id, seq);
-                let packet = Packet { header, data: msg.data };
+                let packet = Packet {
+                    header,
+                    data: msg.data,
+                };
                 trace!("Sending packet to {}: {:?}", target, packet);
                 let bytes = packet.to_bytes();
                 (state.current_seq, _) = state.current_seq.overflowing_add(1);
@@ -309,7 +338,10 @@ async fn send(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) {
             };
             match serde_result {
                 Ok(bytes) => {
-                    socket.send_to(&bytes, target).await.expect("Could not send packet!");
+                    socket
+                        .send_to(&bytes, target)
+                        .await
+                        .expect("Could not send packet!");
                 }
                 Err(err) => error!("Serializing malformed packet, caused {}", err),
             }
@@ -322,7 +354,8 @@ async fn send(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) {
 async fn broadcast(dispatcher: Arc<Dispatcher>, broadcast_socket: Arc<UdpSocket>) {
     let mut ipv4_addrs = best_local_ipv4_addrs()
         .expect("Could not get local IPv4 addresses")
-        .iter().map(|net| SocketAddrV4::new(net.broadcast(), 60_000))
+        .iter()
+        .map(|net| SocketAddrV4::new(net.broadcast(), 60_000))
         .collect::<HashSet<_>>();
     // When we fell back from port 60000 (another process owns it), also broadcast on the
     // loopback network so applications like DJ Link Bridge that are bound to 127.0.0.1
@@ -342,19 +375,27 @@ async fn broadcast(dispatcher: Arc<Dispatcher>, broadcast_socket: Arc<UdpSocket>
         let packets = {
             let mut dispatcher_state = dispatcher.state.write().await;
             let mut config = dispatcher.node_config;
-            config.address.set_port(dispatcher.actual_unicast_port.load(Ordering::Relaxed));
+            config
+                .address
+                .set_port(dispatcher.actual_unicast_port.load(Ordering::Relaxed));
 
             // Unicast to each known node's listener port.
-            let unicast_targets: Vec<SocketAddrV4> = dispatcher_state.discovered_nodes.values()
+            let unicast_targets: Vec<SocketAddrV4> = dispatcher_state
+                .discovered_nodes
+                .values()
                 .map(|n| n.address)
                 .collect();
-            let mut packets: Vec<(SocketAddrV4, Vec<u8>)> = unicast_targets.iter().map(|addr| {
-                let seq = dispatcher_state.current_seq;
-                let pkt = opt_in_packet(&config, &dispatcher_state, seq)
-                    .expect("TCNet: Could not serialize opt in packet");
-                (dispatcher_state.current_seq, _) = dispatcher_state.current_seq.overflowing_add(1);
-                (*addr, pkt)
-            }).collect();
+            let mut packets: Vec<(SocketAddrV4, Vec<u8>)> = unicast_targets
+                .iter()
+                .map(|addr| {
+                    let seq = dispatcher_state.current_seq;
+                    let pkt = opt_in_packet(&config, &dispatcher_state, seq)
+                        .expect("TCNet: Could not serialize opt in packet");
+                    (dispatcher_state.current_seq, _) =
+                        dispatcher_state.current_seq.overflowing_add(1);
+                    (*addr, pkt)
+                })
+                .collect();
 
             // Also broadcast.
             for bcast_addr in &ipv4_addrs {
@@ -407,10 +448,15 @@ async fn active_broadcast(
         .iter()
         .map(|net| SocketAddr::V4(SocketAddrV4::new(net.broadcast(), 60_000)))
         .collect();
-    let on_fallback = socket_60000.local_addr().map(|a| a.port() != 60_000).unwrap_or(false);
+    let on_fallback = socket_60000
+        .local_addr()
+        .map(|a| a.port() != 60_000)
+        .unwrap_or(false);
     if on_fallback {
         broadcast_addrs_60000.insert(SocketAddr::V4(SocketAddrV4::new(
-            Ipv4Addr::LOCALHOST, 60_000)));
+            Ipv4Addr::LOCALHOST,
+            60_000,
+        )));
     }
     let broadcast_addrs_60001: HashSet<SocketAddr> = best_local_ipv4_addrs()
         .expect("Could not get local IPv4 addresses")
@@ -425,10 +471,11 @@ async fn active_broadcast(
         let (node_count, all_addrs, slave_addrs) = {
             let state = dispatcher.state.read().await;
             let node_count = (state.discovered_nodes.len() + 1) as u16;
-            let all_addrs: Vec<SocketAddrV4> = state.discovered_nodes.values()
-                .map(|n| n.address)
-                .collect();
-            let slave_addrs: Vec<SocketAddrV4> = state.discovered_nodes.values()
+            let all_addrs: Vec<SocketAddrV4> =
+                state.discovered_nodes.values().map(|n| n.address).collect();
+            let slave_addrs: Vec<SocketAddrV4> = state
+                .discovered_nodes
+                .values()
                 .filter(|n| matches!(n.config.node_type, NodeType::Slave | NodeType::Repeater))
                 .map(|n| n.address)
                 .collect();
@@ -440,7 +487,9 @@ async fn active_broadcast(
         let mut msgs: Vec<Data> = Vec::new();
         let _ = dispatcher.active_broadcast_rx.drain_into(&mut msgs);
         for mut data in msgs {
-            if let Data::Status(ref mut s) = data { s.node_count = node_count; }
+            if let Data::Status(ref mut s) = data {
+                s.node_count = node_count;
+            }
             let (msg_type_id, _) = data.message_type_id();
             let header = management_header(&dispatcher.node_config, msg_type_id, seq);
             seq = seq.wrapping_add(1);
@@ -457,7 +506,9 @@ async fn active_broadcast(
 
         // Metrics / Meta / Mixer packets — unicast to each slave/repeater node.
         let mut slave_msgs: Vec<Data> = Vec::new();
-        let _ = dispatcher.active_slave_unicast_rx.drain_into(&mut slave_msgs);
+        let _ = dispatcher
+            .active_slave_unicast_rx
+            .drain_into(&mut slave_msgs);
         if !slave_msgs.is_empty() {
             for data in slave_msgs {
                 let (msg_type_id, _) = data.message_type_id();

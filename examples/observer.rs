@@ -11,10 +11,10 @@
 //! reference for building a passive observer with this crate.
 
 use clap::Parser;
+use log::trace;
 use std::net::Ipv4Addr;
 use std::thread::sleep;
 use std::time::Duration;
-use log::trace;
 use tcnet::{ApplicationConfig, DjControllerView, TCNetClient};
 
 #[derive(Parser)]
@@ -26,7 +26,9 @@ fn print_state(view: &mut DjControllerView) {
     // get_layers and get_mixer each reborrow view mutably, so we use separate blocks.
     {
         let layers = view.get_layers();
-        let active: Vec<_> = layers.iter().enumerate()
+        let active: Vec<_> = layers
+            .iter()
+            .enumerate()
             .filter(|(_, l)| l.track_id != 0)
             .collect();
 
@@ -66,7 +68,7 @@ fn main() {
     env_logger::init();
     let args = Args::parse();
     let bind_address = args.binding_ip;
-    
+
     let mut config = ApplicationConfig::default();
     config.address.set_ip(bind_address);
 
@@ -79,14 +81,18 @@ fn main() {
         let nodes = client.active_nodes().to_vec();
         println!("Discovered {} node(s)…", nodes.len());
         for n in &nodes {
-            println!("  {} | has_dj_controller={}", n.address, n.has_dj_controller);
+            println!(
+                "  {} | has_dj_controller={}",
+                n.address, n.has_dj_controller
+            );
         }
 
         if let Some(node) = nodes.iter().find(|n| n.has_dj_controller)
-            && let Some(view) = client.get_controller_view(node.address) {
-                println!("Got DjControllerView for {}\n", node.address);
-                break view;
-            }
+            && let Some(view) = client.get_controller_view(node.address)
+        {
+            println!("Got DjControllerView for {}\n", node.address);
+            break view;
+        }
     };
 
     loop {
