@@ -29,5 +29,5 @@ cargo test -- --test-threads=1 --nocapture
 
 API reference: <https://docs.rs/tcnet>
 
-The full TCNet v3.6 spec is mirrored at
+The full TCNet V3.5.1 spec is mirrored at
 <https://www.tc-supply.com/_files/ugd/b1c714_0b351a4099c14e738f0cd7fcea623265.pdf>.
