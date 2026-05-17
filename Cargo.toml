@@ -3,11 +3,13 @@ name = "tcnet"
 version = "0.1.0"
 edition = "2024"
 authors = ["Julius Schmitt dev@jsch.in"]
-description = "Rust implementation of the TCNet UDP protocol (v3.6) — alpha, currently untested in production."
+description = "Rust implementation of the TCNet protocol."
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/bratorange/tcnet-rs"
+repository = "https://github.com/bratorange/tcnet"
 documentation = "https://docs.rs/tcnet"
+homepage = "https://github.com/bratorange/tcnet"
 readme = "README.md"
+keywords = ["VJ", "Syncronization", "DJ"]
 
 [lib]
 name = "tcnet"
