@@ -17,7 +17,7 @@ use crate::node::response_data::SharedResponseData;
 use crate::node::tcnet_packet::{management_header, node_config_from_opt_in, opt_in_packet, Packet};
 use crate::node::tcnet_packet::Data::{OptIn, OptOut};
 use crate::node::tcnet_packet::Data;
-use crate::node::tcnet_packet_serde::{
+use crate::protocol::{
     LayerId, NodeType, RequestDataType,
 };
 use crate::ForeignNodeInfo;

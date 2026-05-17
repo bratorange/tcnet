@@ -13,7 +13,7 @@ use std::time::Duration;
 use deku::DekuContainerWrite;
 use log::trace;
 use crate::node::tcnet_packet::management_header;
-use crate::node::tcnet_packet_serde::{
+use crate::protocol::{
     AutoMasterMode, LayerId, LayerState, LayerStatus, LayerTimecode,
     MetricsData, MixerChannel, MixerData, NodeOptions, NodeType, OptInData,
     RequestData, RequestDataType, StatusData, TimePacketData,

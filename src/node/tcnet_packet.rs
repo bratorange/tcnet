@@ -1,7 +1,7 @@
 use crate::into_ascii;
 use crate::node::dispatcher::timestamp_micros;
 use crate::node::tcnet_packet::Data::*;
-use crate::node::tcnet_packet_serde::*;
+use crate::protocol::*;
 use crate::node::{ApplicationConfig, DynamicNodeState};
 use deku::prelude::Writer;
 use deku::{DekuContainerRead, DekuContainerWrite, DekuError, DekuWrite, DekuWriter};

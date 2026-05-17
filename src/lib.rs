@@ -1,8 +1,88 @@
+//! # tcnet
+//!
+//! A Rust implementation of the **TCNet** UDP protocol — a network protocol used by
+//! professional DJ / VJ gear (Pioneer / ProDJ Link adjacent) for synchronising
+//! playback state, mixer state, beat-grid information and waveform previews between
+//! networked nodes.
+//!
+//! This crate covers protocol version `3.6` (the value emitted in every outgoing
+//! [`ManagementHeader`](crate::protocol::ManagementHeader)) and supports both roles:
+//!
+//! * **Passive observer** — discover foreign DJ controller nodes broadcasting on the
+//!   network and read their state through [`DjControllerView`]. Useful for VJ tools,
+//!   visualisers, lighting controllers, analytics, etc.
+//! * **Active broadcaster** — present this process as a virtual DJ node via
+//!   [`ActiveDJNode`]: announce up to eight layers of playback, push Time / Status /
+//!   Metrics / Meta / Mixer packets, and serve pre-built waveform / beat-grid / cue /
+//!   artwork responses on request.
+//!
+//! ## Specification
+//!
+//! The packet layouts, message-type IDs and field meanings all follow the official
+//! spec, available here:
+//!
+//! <https://www.tc-supply.com/_files/ugd/b1c714_0b351a4099c14e738f0cd7fcea623265.pdf>
+//!
+//! Citations elsewhere in these docs link back to that PDF.
+//!
+//! ## Quick start
+//!
+//! ```no_run
+//! use std::thread::sleep;
+//! use std::time::Duration;
+//! use tcnet::{ApplicationConfig, TCNetClient};
+//!
+//! let config = ApplicationConfig::default();
+//! let mut client = TCNetClient::new(config);
+//!
+//! // Wait for a foreign DJ controller to be discovered, then read its state.
+//! loop {
+//!     for node in client.active_nodes() {
+//!         if node.has_dj_controller {
+//!             if let Some(mut view) = client.get_controller_view(node.address) {
+//!                 for (i, layer) in view.get_layers().iter().enumerate() {
+//!                     println!("L{}: {:?} @ {:.1} BPM", i + 1, layer.state, layer.bpm.as_f32());
+//!                 }
+//!             }
+//!         }
+//!     }
+//!     sleep(Duration::from_secs(1));
+//! }
+//! ```
+//!
+//! ## Architecture
+//!
+//! ```text
+//!                                ┌──────────────────────────────┐
+//!                                │ TCNetClient                  │
+//!                                │   • spawns tokio runtime     │
+//!                                │   • binds UDP sockets        │
+//!                                │   • runs OptIn discovery     │
+//!  network                       │   • dispatches packets       │
+//! ──────────                     │                              │
+//!  60000 ── broadcast ◀──────────┤                              │
+//!  60001 ── time     ◀──────────►│        Dispatcher            │◀── ActiveDJNode (broadcast role)
+//!  60002 ── broadcast ◀──────────┤                              │
+//!  port  ── unicast   ◀──────────┤                              │
+//!                                │                              │
+//!                                │   per-foreign-node triple    │
+//!                                │   buffer ──────────────────► │── DjControllerView (read role)
+//!                                └──────────────────────────────┘
+//! ```
+//!
+//! ## Module layout
+//!
+//! * [`protocol`] — wire-format types: every packet payload struct, plus helper
+//!   types ([`LayerId`], [`LayerState`], [`Bpm`], [`Speed`], …).
+//! * [`view`] — read-only consumer view of a discovered foreign node.
+//!
+//! Most users only need the types re-exported at the crate root.
+
 use crate::node::dispatcher::{start_node, Dispatcher};
 use crate::node::dj_controller::OutgoingRequest;
 use crate::node::response_data::{ResponseDataStore, SharedResponseData};
 use crate::node::tcnet_packet::Data;
-use crate::node::tcnet_packet_serde::NodeId;
+use crate::protocol::NodeId;
 use crate::node::{DynamicNodeState, ForeignNode};
 use std::net::SocketAddrV4;
 use std::sync::{Arc, Mutex};
@@ -10,28 +90,37 @@ use std::sync::atomic::AtomicU16;
 use tokio::runtime::Runtime;
 use tokio::sync::RwLock;
 
-pub mod node;
+pub mod protocol;
+pub mod view;
 pub mod active_node;
-mod dj_controller_view;
+mod node;
 #[cfg(test)]
 mod tests;
 
-pub use active_node::ActiveDJNode;
-pub use dj_controller_view::{DjControllerView, WaveformRequester};
+pub use active_node::{ActiveDJNode, TrackMeta};
+pub use view::{DjControllerView, WaveformRequester};
+pub use node::ApplicationConfig;
 pub use node::dj_controller::{
     ChannelSnapshot, DjControllerState, LayerSnapshot, MixerSnapshot, TimeoutError,
 };
-pub use node::tcnet_packet_serde::{
-    BeatGridEntry, BeatGridHeader, BigWaveformData, LayerId, NodeType, SmallWaveformData,
+pub use protocol::{
+    AsciiString, BeatGridEntry, BeatGridHeader, BigWaveformData, Bpm, LayerId, LayerState,
+    NodeOptions, NodeType, RequestDataType, SmallWaveformData, SmpteMode, Speed,
 };
-pub use node::ApplicationConfig;
 
-/// Snapshot of a discovered foreign node, readable via `TCNetClient::active_nodes()`.
+/// Snapshot of a foreign node discovered on the network through TCNet OptIn
+/// broadcasts. Returned by [`TCNetClient::active_nodes`].
 #[derive(Clone, Debug)]
 pub struct ForeignNodeInfo {
+    /// The node's listener address (IP + unicast port reported in its OptIn packet).
     pub address: SocketAddrV4,
+    /// Wall-clock timestamp (UNIX seconds) of the last packet received from this node.
+    /// Nodes silent for ≥ 10 s are dropped from the active set automatically.
     pub last_seen: u64,
+    /// The 16-bit node identifier reported in the node's `ManagementHeader`.
     pub node_id: NodeId,
+    /// `true` once any DJ-controller-class packet (Status / Metrics / Mixer / etc.)
+    /// has been received from this node — meaning a [`DjControllerView`] is available.
     pub has_dj_controller: bool,
 }
 
@@ -46,6 +135,23 @@ impl From<&ForeignNode> for ForeignNodeInfo {
     }
 }
 
+/// Entry point to the TCNet network.
+///
+/// Constructing a `TCNetClient` spawns a dedicated single-threaded tokio runtime,
+/// binds the four UDP sockets used by TCNet (broadcast on 60000 / 60001 / 60002,
+/// plus a configurable unicast port — the dispatcher will fall back to the next
+/// free port if any of these are taken) and starts the discovery loop, which
+/// emits an OptIn broadcast every second and listens for replies from peers.
+///
+/// From here the two roles split:
+///
+/// * Call [`get_controller_view`](Self::get_controller_view) (or
+///   [`get_any_controller_view`](Self::get_any_controller_view)) to attach a
+///   reader to a foreign DJ controller node.
+/// * Call [`create_active_node`](Self::create_active_node) to start broadcasting
+///   this process's playback state.
+///
+/// Both can be used at the same time.
 pub struct TCNetClient {
     _runtime: Runtime,
     dispatcher: Arc<Dispatcher>,
@@ -58,6 +164,12 @@ pub struct TCNetClient {
 }
 
 impl TCNetClient {
+    /// Construct a new client and start the network dispatcher.
+    ///
+    /// The `node_config` describes how this node will identify itself to peers
+    /// (node id, vendor / application name, node options, bind address). See
+    /// [`ApplicationConfig`] for the field semantics; `ApplicationConfig::default()`
+    /// produces a usable configuration that binds to `0.0.0.0:65023`.
     pub fn new(node_config: ApplicationConfig) -> Self {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
@@ -102,14 +214,21 @@ impl TCNetClient {
         }
     }
 
-    /// Returns the latest known set of active foreign nodes.
+    /// Return the latest known set of foreign nodes seen on the network.
+    ///
+    /// This is a snapshot — calling it again later returns an updated list.
+    /// Nodes that have not been heard from for ≥ 10 s are dropped automatically.
     pub fn active_nodes(&mut self) -> &[ForeignNodeInfo] {
         self.cached_nodes = self.nodes_output.read().clone();
         &self.cached_nodes
     }
 
-    /// Returns a `DjControllerView` for the node at `addr` if DJ-type packets
-    /// have been received from it.
+    /// Attach a reader to the foreign DJ controller node at `addr`.
+    ///
+    /// Returns `None` if no node is currently registered at that address, if no
+    /// DJ-class packets have been received from it yet, **or** if a view has
+    /// already been taken for the same node — each node's triple-buffer output
+    /// can only be claimed once, so the second call returns `None`.
     pub fn get_controller_view(&self, addr: SocketAddrV4) -> Option<DjControllerView> {
         self._runtime.block_on(async {
             let mut state = self.dispatcher.state.write().await;
@@ -120,7 +239,9 @@ impl TCNetClient {
         })
     }
 
-    /// Returns a `DjControllerView` for the first discovered DJ controller node.
+    /// Convenience: return a [`DjControllerView`] for the first discovered node
+    /// that has a DJ controller attached. Returns `None` if no such node has
+    /// been seen yet.
     pub fn get_any_controller_view(&self) -> Option<DjControllerView> {
         self._runtime.block_on(async {
             let mut state = self.dispatcher.state.write().await;
@@ -134,14 +255,21 @@ impl TCNetClient {
         })
     }
 
-    /// Returns a clonable handle to the internal tokio runtime so embedders can
-    /// spawn supplementary async work (e.g. background waveform requests) on it
-    /// without bringing up their own runtime.
+    /// Return a handle to the internal tokio runtime.
+    ///
+    /// Useful for embedders that want to schedule supplementary async work
+    /// (e.g. background waveform polling) without bringing up a second
+    /// runtime — call `runtime_handle().spawn(...)`.
     pub fn runtime_handle(&self) -> tokio::runtime::Handle {
         self._runtime.handle().clone()
     }
 
-    /// Creates an `ActiveDJNode` that broadcasts this node's state over TCNet.
+    /// Create an [`ActiveDJNode`] that broadcasts this process's playback and
+    /// mixer state over TCNet.
+    ///
+    /// The active node shares the underlying sockets, runtime and dispatcher
+    /// with this client — every TCNetClient can have at most one ActiveDJNode
+    /// active at a time.
     pub fn create_active_node(&self) -> ActiveDJNode {
         ActiveDJNode::new(
             self.active_broadcast_tx.clone(),

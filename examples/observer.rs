@@ -1,3 +1,15 @@
+//! Example binary that passively listens for a foreign TCNet DJ controller
+//! and prints its layer + mixer state every 500 ms.
+//!
+//! Run with the bind IP of the local network interface:
+//!
+//! ```sh
+//! cargo run --example observer -- 192.168.1.42
+//! ```
+//!
+//! Useful as a quick connectivity / discovery test and as a minimum-viable
+//! reference for building a passive observer with this crate.
+
 use clap::Parser;
 use std::net::Ipv4Addr;
 use std::thread::sleep;

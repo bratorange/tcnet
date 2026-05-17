@@ -1,16 +1,25 @@
 [package]
-name = "tcnet-rs"
+name = "tcnet"
 version = "0.1.0"
 edition = "2024"
 authors = ["Julius Schmitt dev@jsch.in"]
+description = "Rust implementation of the TCNet UDP protocol (v3.6) — alpha, currently untested in production."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/bratorange/tcnet-rs"
+documentation = "https://docs.rs/tcnet"
+readme = "README.md"
 
 [lib]
 name = "tcnet"
 path = "src/lib.rs"
 
-[[bin]]
-name = "tcnet_test_node"
-path = "src/main.rs"
+[[example]]
+name = "observer"
+path = "examples/observer.rs"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 bitflags = "2.11.0"
@@ -19,7 +28,7 @@ tokio = { version = "1.49.0", features = ["time", "net", "sync", "rt-multi-threa
 log = "0.4.29"
 env_logger = "0.11.9"
 clap = { version = "4.5.60", features = ["derive"] }
-getifs = "0.4.0"
+getifs = "0.6.0"
 kanal = "0.1.1"
 triple_buffer = "9.0.0"
 

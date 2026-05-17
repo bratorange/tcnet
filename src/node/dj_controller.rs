@@ -1,5 +1,5 @@
 use crate::node::tcnet_packet::{Data, Packet};
-use crate::node::tcnet_packet_serde::{
+use crate::protocol::{
     ArtworkFileData, BeatGridHeader, BigWaveformData, Bpm, LayerId, LayerState, MixerChannel,
     RequestData, RequestDataType, SmallWaveformData, SmpteMode, Speed,
 };
@@ -12,6 +12,12 @@ use tokio::sync::oneshot;
 // Snapshot types
 // ---------------------------------------------------------------------------
 
+/// Decoded snapshot of a foreign mixer's state.
+///
+/// Built from incoming [`MixerData`](crate::protocol::MixerData) packets and
+/// republished through a triple buffer to
+/// [`DjControllerView::get_mixer`](crate::DjControllerView::get_mixer).
+/// All 8-bit level / EQ / filter fields range over `0..=255`.
 #[derive(Debug, Clone, Default)]
 pub struct MixerSnapshot {
     pub mixer_id: u8,
@@ -68,6 +74,7 @@ pub struct MixerSnapshot {
 }
 
 impl MixerSnapshot {
+    /// 1-based indices of channels routed to the headphone CUE A bus.
     pub fn cue_a_channels(&self) -> Vec<usize> {
         self.channels.iter().enumerate()
             .filter(|(_, ch)| ch.cue_a)
@@ -75,6 +82,7 @@ impl MixerSnapshot {
             .collect()
     }
 
+    /// 1-based indices of channels whose fader is open (`fader_level > 0`).
     pub fn on_air_channels(&self) -> Vec<usize> {
         self.channels.iter().enumerate()
             .filter(|(_, ch)| ch.is_on())
@@ -83,6 +91,11 @@ impl MixerSnapshot {
     }
 }
 
+/// Decoded snapshot of one mixer channel — a fader strip on the physical mixer.
+///
+/// All 8-bit fields range over `0..=255`. `cue_a` / `cue_b` indicate
+/// headphone-cue assignment; `crossfader_assign` selects which crossfader
+/// side this channel feeds.
 #[derive(Debug, Clone, Default)]
 pub struct ChannelSnapshot {
     pub source_select: u8,
@@ -102,6 +115,7 @@ pub struct ChannelSnapshot {
 }
 
 impl ChannelSnapshot {
+    /// `true` if the channel's fader is open at all (`fader_level > 0`).
     pub fn is_on(&self) -> bool {
         self.fader_level > 0
     }
@@ -128,6 +142,19 @@ impl From<&MixerChannel> for ChannelSnapshot {
     }
 }
 
+/// Decoded snapshot of one layer's state.
+///
+/// Built by merging incoming
+/// [`StatusData`](crate::protocol::StatusData),
+/// [`MetricsData`](crate::protocol::MetricsData),
+/// [`MetaData`](crate::protocol::MetaData) and
+/// [`TimePacketData`](crate::protocol::TimePacketData) packets into one
+/// flattened view. Republished through a triple buffer to
+/// [`DjControllerView::get_layers`](crate::DjControllerView::get_layers).
+///
+/// `current_time_ms` (from Time packets, updated ~20 ms) is the most
+/// frequently refreshed position field. `position_ms` (from Metrics packets,
+/// updated ~50 ms) is the same value sampled at a lower cadence.
 #[derive(Debug, Clone, Default)]
 pub struct LayerSnapshot {
     pub source: u8,
@@ -161,6 +188,9 @@ pub struct LayerSnapshot {
 }
 
 impl LayerSnapshot {
+    /// `true` if the mixer is reporting the layer's fader as non-zero —
+    /// derived from the per-layer `*_on_air` byte in
+    /// [`TimePacketData`](crate::protocol::TimePacketData).
     pub fn is_on_air(&self) -> bool {
         self.on_air > 0
     }
@@ -170,6 +200,12 @@ impl LayerSnapshot {
 // Triple buffer payload
 // ---------------------------------------------------------------------------
 
+/// Combined snapshot of one foreign DJ controller: all eight
+/// [`LayerSnapshot`]s plus one [`MixerSnapshot`].
+///
+/// Passed through a triple buffer to [`DjControllerView`](crate::DjControllerView).
+/// `layers` is always indexed in [`LayerId::ALL`](crate::LayerId::ALL) order
+/// (`L1, L2, L3, L4, LA, LB, LM, LC`).
 #[derive(Clone, Debug)]
 pub struct DjControllerState {
     pub layers: Vec<LayerSnapshot>,
@@ -189,6 +225,9 @@ impl Default for DjControllerState {
 // Public error type
 // ---------------------------------------------------------------------------
 
+/// Returned when a [`DjControllerView`](crate::DjControllerView) request for
+/// waveform / beat-grid / artwork data does not receive a response within 5 s
+/// (or the underlying request channel has been closed).
 #[derive(Debug)]
 pub struct TimeoutError;
 

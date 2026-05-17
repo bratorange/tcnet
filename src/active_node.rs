@@ -1,10 +1,12 @@
+//! Active broadcaster role: present this process as a TCNet DJ controller node.
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::runtime::Runtime;
 use tokio::time::interval;
 use crate::node::dj_controller::{ChannelSnapshot, LayerSnapshot, MixerSnapshot};
 use crate::node::tcnet_packet::Data;
-use crate::node::tcnet_packet_serde::{
+use crate::protocol::{
     ArtworkFileData, BeatGridEntry, BeatGridHeader, BigWaveformData, CueData, SmallWaveformData,
     AutoMasterMode, Bpm, LayerId, LayerState, LayerStatus, LayerTimecode,
     MetaData, MetricsData, MixerChannel, MixerData, ReservedData, SmpteMode,
@@ -18,12 +20,24 @@ pub use kanal::SendError;
 // Public metadata type for track loading
 // ---------------------------------------------------------------------------
 
+/// Minimum metadata required to "load" a track on an [`ActiveDJNode`] layer.
+///
+/// Passed to [`ActiveDJNode::load_track`] — populates the layer's
+/// [`StatusData`] / [`MetaData`] fields and pre-builds a synthesised beat grid
+/// from `bpm × duration_ms`. Real waveform / beat-grid data can be installed
+/// afterwards with [`ActiveDJNode::set_response_waveforms`] /
+/// [`ActiveDJNode::set_response_beat_grid`].
 #[derive(Debug, Clone)]
 pub struct TrackMeta {
+    /// Track title (rendered as UTF-16 LE on the wire).
     pub title: String,
+    /// Track artist (rendered as UTF-16 LE on the wire).
     pub artist: String,
+    /// Track duration in milliseconds.
     pub duration_ms: u32,
+    /// BPM (e.g. `128.0`). Stored as `BPM × 100` on the wire.
     pub bpm: f32,
+    /// Track identifier (unique within the node).
     pub track_id: u32,
 }
 
@@ -308,6 +322,24 @@ impl ActiveNodeInner {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Broadcasts this process's state as a TCNet DJ controller node.
+///
+/// Created via [`TCNetClient::create_active_node`](crate::TCNetClient::create_active_node).
+/// A background tokio task drives the periodic broadcasts:
+///
+/// * **Time packets** (message type 254) every 20 ms — the high-frequency
+///   clock everyone syncs to.
+/// * **Status packets** (message type 5) every 1 s — the directory of layer
+///   sources / loaded tracks / layer names.
+/// * **Metrics packets** (message type 200/2) every 50 ms for every layer
+///   whose state is `Playing` or `Looping`.
+///
+/// In addition, the node caches pre-built **response packets** for waveform,
+/// beat-grid, cue, artwork and mixer queries — peers that issue a
+/// [`RequestData`](crate::protocol::RequestData) get these answered
+/// automatically. Replace the placeholder waveforms/beat-grid with real
+/// audio-derived data via [`set_response_waveforms`](Self::set_response_waveforms)
+/// and [`set_response_beat_grid`](Self::set_response_beat_grid).
 pub struct ActiveDJNode {
     inner: Arc<Mutex<ActiveNodeInner>>,
     broadcast_tx: kanal::Sender<Data>,
@@ -399,16 +431,21 @@ impl ActiveDJNode {
 
     // --- playback ---
 
+    /// Mark `layer` as `Playing` and broadcast an updated [`MetricsData`].
     pub fn play(&mut self, layer: LayerId) -> Result<(), SendError> {
         self.inner.lock().unwrap().layer_mut(layer).state = LayerState::Playing;
         self.update_metrics(layer)
     }
 
+    /// Mark `layer` as `Paused` at its current position and broadcast an
+    /// updated [`MetricsData`].
     pub fn pause(&mut self, layer: LayerId) -> Result<(), SendError> {
         self.inner.lock().unwrap().layer_mut(layer).state = LayerState::Paused;
         self.update_metrics(layer)
     }
 
+    /// Mark `layer` as `Stopped`, snap the playhead to position 0 and
+    /// broadcast an updated [`MetricsData`].
     pub fn stop(&mut self, layer: LayerId) -> Result<(), SendError> {
         {
             let mut inner = self.inner.lock().unwrap();
@@ -420,6 +457,8 @@ impl ActiveDJNode {
         self.update_metrics(layer)
     }
 
+    /// Move `layer` to `pos_ms` and report it as `CueButtonDown` — equivalent
+    /// to holding a hot-cue on a physical CDJ.
     pub fn cue(&mut self, layer: LayerId, pos_ms: u32) -> Result<(), SendError> {
         {
             let mut inner = self.inner.lock().unwrap();
@@ -433,6 +472,23 @@ impl ActiveDJNode {
 
     // --- track loading ---
 
+    /// Load a new track on `layer`.
+    ///
+    /// Populates the layer state from `info`, marks it `Stopped` at position 0,
+    /// pre-builds the response packets that peers can later request:
+    ///
+    /// * [`SmallWaveformData`] / [`BigWaveformData`] — placeholder uniform-blue
+    ///   waveform; call [`set_response_waveforms`](Self::set_response_waveforms)
+    ///   to overwrite with audio-derived data.
+    /// * [`BeatGridHeader`] — synthesised from `info.bpm × info.duration_ms`
+    ///   (downbeat every 4 beats); call
+    ///   [`set_response_beat_grid`](Self::set_response_beat_grid) to overwrite
+    ///   with real detection results.
+    /// * [`CueData`] — empty.
+    /// * [`ArtworkFileData`] — empty.
+    ///
+    /// Finally broadcasts a [`StatusData`] packet and unicasts a [`MetaData`]
+    /// packet so peers see the new track immediately.
     pub fn load_track(&mut self, layer: LayerId, info: TrackMeta) -> Result<(), SendError> {
         {
             let mut inner = self.inner.lock().unwrap();
@@ -517,6 +573,8 @@ impl ActiveDJNode {
         self.update_meta(layer)
     }
 
+    /// Clear `layer` back to the default empty state and broadcast a
+    /// [`StatusData`] so peers stop showing the previous track.
     pub fn unload_track(&mut self, layer: LayerId) -> Result<(), SendError> {
         {
             let mut inner = self.inner.lock().unwrap();
@@ -528,6 +586,7 @@ impl ActiveDJNode {
 
     // --- position / tempo ---
 
+    /// Move `layer`'s playhead to `ms`. Broadcasts an updated [`MetricsData`].
     pub fn set_position_ms(&mut self, layer: LayerId, ms: u32) -> Result<(), SendError> {
         {
             let mut inner = self.inner.lock().unwrap();
@@ -538,16 +597,19 @@ impl ActiveDJNode {
         self.update_metrics(layer)
     }
 
+    /// Set the layer's BPM (encoded as `bpm × 100` on the wire).
     pub fn set_bpm(&mut self, layer: LayerId, bpm: f32) -> Result<(), SendError> {
         self.inner.lock().unwrap().layer_mut(layer).bpm = Bpm((bpm * 100.0) as u32);
         self.update_metrics(layer)
     }
 
+    /// Set the layer's playback [`Speed`] (32768 = 100%).
     pub fn set_speed(&mut self, layer: LayerId, speed: Speed) -> Result<(), SendError> {
         self.inner.lock().unwrap().layer_mut(layer).speed = speed;
         self.update_metrics(layer)
     }
 
+    /// Mark `layer` as the sync master (or clear the flag).
     pub fn set_sync_master(&mut self, layer: LayerId, master: bool) -> Result<(), SendError> {
         self.inner.lock().unwrap().layer_mut(layer).sync_master = master;
         self.update_metrics(layer)
@@ -555,26 +617,31 @@ impl ActiveDJNode {
 
     // --- mixer ---
 
+    /// Set the master fader level (0–255). Broadcasts an updated [`MixerData`].
     pub fn set_master_fader(&mut self, level: u8) -> Result<(), SendError> {
         self.inner.lock().unwrap().mixer.master_fader_level = level;
         self.update_mixer()
     }
 
+    /// Set the crossfader position (0 = full A, 255 = full B).
     pub fn set_crossfader(&mut self, pos: u8) -> Result<(), SendError> {
         self.inner.lock().unwrap().mixer.crossfader = pos;
         self.update_mixer()
     }
 
+    /// Set channel `ch`'s fader level (0–255). Channels are 0-based, 6 total.
     pub fn set_channel_fader(&mut self, ch: usize, level: u8) -> Result<(), SendError> {
         if ch < 6 { self.inner.lock().unwrap().mixer.channels[ch].fader_level = level; }
         self.update_mixer()
     }
 
+    /// Set channel `ch`'s trim / gain (0–255).
     pub fn set_channel_trim(&mut self, ch: usize, level: u8) -> Result<(), SendError> {
         if ch < 6 { self.inner.lock().unwrap().mixer.channels[ch].trim_level = level; }
         self.update_mixer()
     }
 
+    /// Set channel `ch`'s three-band EQ (each 0–255).
     pub fn set_channel_eq(&mut self, ch: usize, hi: u8, mid: u8, low: u8) -> Result<(), SendError> {
         if ch < 6 {
             let mut inner = self.inner.lock().unwrap();
@@ -585,11 +652,13 @@ impl ActiveDJNode {
         self.update_mixer()
     }
 
+    /// Set channel `ch`'s colour filter / sound-colour FX position (0–255).
     pub fn set_channel_filter(&mut self, ch: usize, val: u8) -> Result<(), SendError> {
         if ch < 6 { self.inner.lock().unwrap().mixer.channels[ch].filter_color = val; }
         self.update_mixer()
     }
 
+    /// Toggle channel `ch`'s assignment to the headphone CUE A / B buses.
     pub fn set_channel_cue(&mut self, ch: usize, cue_a: bool, cue_b: bool) -> Result<(), SendError> {
         if ch < 6 {
             let mut inner = self.inner.lock().unwrap();
@@ -599,15 +668,26 @@ impl ActiveDJNode {
         self.update_mixer()
     }
 
+    /// Set the layer's on-air state — the fader-position byte (0 = down,
+    /// 255 = fully up) carried in [`TimePacketData`]'s `l*_on_air` fields.
+    ///
+    /// Does not broadcast immediately; the change is picked up by the next
+    /// scheduled Time-packet emission (~20 ms cadence).
     pub fn set_on_air(&mut self, layer: LayerId, on_air: u8) {
         self.inner.lock().unwrap().layer_mut(layer).on_air = on_air;
     }
 
-    /// Overwrite the cached beat-grid response packets for `layer` with
-    /// audio-derived entries. `entries` is a sequence of
-    /// `(beat_number, beat_type, timestamp_ms)` where `beat_type` follows the
-    /// TCNet convention (20 = downbeat, 10 = upbeat). Splits across 2400-byte
-    /// clusters per spec.
+    /// Overwrite the cached beat-grid response for `layer` with real
+    /// audio-derived entries.
+    ///
+    /// `entries` is a sequence of `(beat_number, beat_type, timestamp_ms)`
+    /// tuples following the TCNet convention (`beat_type = 20` for downbeats,
+    /// `10` for upbeats). The payload is automatically split across the
+    /// spec-mandated 2400-byte clusters into one or more [`BeatGridHeader`]
+    /// chunks. Peers that issue a
+    /// [`RequestData`](crate::protocol::RequestData) for
+    /// [`BeatGridData`](crate::RequestDataType::BeatGridData) will receive the
+    /// new grid on the next exchange.
     pub fn set_response_beat_grid(&self, layer: LayerId, entries: &[(u16, u8, u32)]) {
         use deku::DekuContainerWrite;
         let lid = layer.as_packet_id();
@@ -644,10 +724,17 @@ impl ActiveDJNode {
         }
     }
 
-    /// Overwrite the cached response packets for SmallWaveform and BigWaveform
-    /// for `layer`. The dispatcher will return these in response to TCNet
-    /// `RequestData` messages. Call after `load_track` to replace the
-    /// placeholder bytes with audio-derived data.
+    /// Overwrite the cached small + big waveform responses for `layer`.
+    ///
+    /// * `small` — exactly 2400 bytes (1200 `(level, colour)` pairs); see
+    ///   [`SmallWaveformData`] for the byte-pair layout.
+    /// * `big` — variable-length payload, auto-split into 4400-byte chunks.
+    ///
+    /// Call after [`load_track`](Self::load_track) to replace the placeholder
+    /// bytes with audio-derived data. Peers' subsequent
+    /// [`SmallWaveformData`](crate::RequestDataType::SmallWaveformData) /
+    /// [`LargeWaveformData`](crate::RequestDataType::LargeWaveformData)
+    /// requests see the new bytes.
     pub fn set_response_waveforms(&self, layer: LayerId, small: [u8; 2400], big: Vec<u8>) {
         if let Ok(mut rd) = self.response_data.lock() {
             let ld = &mut rd.layers[layer.index()];
@@ -679,14 +766,17 @@ impl ActiveDJNode {
 
     // --- state read access ---
 
+    /// Snapshot of the eight layer states currently being broadcast.
     pub fn layers(&self) -> Vec<LayerSnapshot> {
         self.inner.lock().unwrap().layers.clone()
     }
 
+    /// Snapshot of the mixer state currently being broadcast.
     pub fn mixer(&self) -> MixerSnapshot {
         self.inner.lock().unwrap().mixer.clone()
     }
 
+    /// Snapshot of one channel's state (clamped to channel 5 if `ch >= 6`).
     pub fn channel_snapshot(&self, ch: usize) -> ChannelSnapshot {
         self.inner.lock().unwrap().mixer.channels[ch.min(5)].clone()
     }
