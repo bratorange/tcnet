@@ -99,6 +99,12 @@ pub type NodeName = AsciiString<8>;
 #[derive(PartialEq, DekuWrite, DekuRead, Clone)]
 pub struct ReservedData<const N: usize>(pub [u8; N]);
 
+impl<const N: usize> serde::Serialize for ReservedData<N> {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        ser.serialize_unit()
+    }
+}
+
 impl<const N: usize> Default for ReservedData<N> {
     fn default() -> Self {
         ReservedData([0; N])
@@ -187,7 +193,7 @@ impl<const N: usize> Debug for AsciiString<N> {
 /// as sample-player layers, `LM` as the microphone layer, and `LC` as an
 /// auxiliary / cue layer. Wire-encoded as the 1-based packet IDs listed below;
 /// see also [`LayerId::index`] for 0-based array indexing.
-#[derive(Debug, PartialEq, Eq, Clone, Copy, DekuRead, DekuWrite, Hash)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, DekuRead, DekuWrite, Hash, serde::Serialize)]
 #[deku(id_type = "u8")]
 #[repr(u8)]
 pub enum LayerId {
@@ -263,7 +269,7 @@ impl LayerId {
 
 /// Current playhead state of a single layer, as transmitted in
 /// [`MetricsData`] and [`TimePacketData`].
-#[derive(Debug, PartialEq, Clone, Copy, DekuRead, DekuWrite, Default)]
+#[derive(Debug, PartialEq, Clone, Copy, DekuRead, DekuWrite, Default, serde::Serialize)]
 #[deku(id_type = "u8")]
 #[repr(u8)]
 pub enum LayerState {
@@ -305,7 +311,7 @@ impl LayerState {
 /// [`TimePacketData::smpte_mode`].
 ///
 /// `Fps2997` represents 29.97 drop-frame timecode.
-#[derive(Debug, PartialEq, Clone, Copy, DekuRead, DekuWrite, Default)]
+#[derive(Debug, PartialEq, Clone, Copy, DekuRead, DekuWrite, Default, serde::Serialize)]
 #[deku(id_type = "u8")]
 #[repr(u8)]
 pub enum SmpteMode {
@@ -338,7 +344,7 @@ impl SmpteMode {
 /// Encoded as an unsigned integer where `32768` = 100% (normal speed),
 /// `0` = stopped, `65536` = 200%. Use [`Speed::as_percent`] for a floating-point
 /// percentage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
 pub struct Speed(pub u32);
 
 impl Speed {
@@ -358,7 +364,7 @@ impl Speed {
 /// Stored as `BPM × 100` in an unsigned integer to avoid floating-point on the
 /// wire (e.g. 134.00 BPM is encoded as `13400`). Use [`Bpm::as_f32`] for a
 /// floating-point view.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
 pub struct Bpm(pub u32);
 
 impl Bpm {
@@ -675,7 +681,7 @@ pub struct BeatGridHeader {
 /// One entry in a beat grid: a labelled beat at a specific timestamp.
 ///
 /// `beat_type` follows the TCNet convention `20 = downbeat`, `10 = upbeat`.
-#[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
+#[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone, serde::Serialize)]
 pub struct BeatGridEntry {
     /// 1-based beat number within the track.
     #[deku(endian = "little")]
@@ -692,7 +698,7 @@ pub struct BeatGridEntry {
 ///
 /// Holds the cue's type byte, start/end times in milliseconds and an RGB
 /// colour. Up to 18 entries are carried per layer.
-#[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
+#[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone, serde::Serialize)]
 pub struct CueEntry {
     cue_type: u8,                // Cue Type
     _reserved0: ReservedData<1>, // RESERVED
@@ -708,7 +714,7 @@ pub struct CueEntry {
 /// Cue and loop information for a layer (message type 200, data type 12).
 ///
 /// Carries up to 18 cue entries plus the current loop in/out points (in ms).
-#[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
+#[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone, serde::Serialize)]
 pub struct CueData {
     data_type: u8,                // Datatype 12 = Cue Data
     layer_id: u8,                 // Layer Number
@@ -1133,6 +1139,22 @@ impl CueEntry {
         cue_color: [0; 3],
         _reserved2: ReservedData([0; 8]),
     };
+
+    pub fn cue_type(&self) -> u8 {
+        self.cue_type
+    }
+    pub fn cue_in_time(&self) -> u32 {
+        self.cue_in_time
+    }
+    pub fn cue_out_time(&self) -> u32 {
+        self.cue_out_time
+    }
+    pub fn cue_color(&self) -> [u8; 3] {
+        self.cue_color
+    }
+    pub fn is_empty(&self) -> bool {
+        self.cue_type == 0
+    }
 }
 
 impl CueData {
@@ -1151,5 +1173,32 @@ impl CueData {
             loop_out: 0,
             cues,
         }
+    }
+
+    /// Build a fully-specified [`CueData`] response: all 18 cue slots + loop
+    /// in/out. Slot 0 is conventionally the [CUE] memory marker; slots 1..=8
+    /// the hot-cue pads A–H; 9..=17 are spare.
+    pub fn build(layer_id: u8, cues: [CueEntry; 18], loop_in: u32, loop_out: u32) -> Self {
+        Self {
+            data_type: 12,
+            layer_id,
+            _reserved0: ReservedData::default(),
+            loop_in,
+            loop_out,
+            cues,
+        }
+    }
+
+    pub fn layer_id(&self) -> u8 {
+        self.layer_id
+    }
+    pub fn loop_in(&self) -> u32 {
+        self.loop_in
+    }
+    pub fn loop_out(&self) -> u32 {
+        self.loop_out
+    }
+    pub fn cues(&self) -> &[CueEntry; 18] {
+        &self.cues
     }
 }

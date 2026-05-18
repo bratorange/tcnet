@@ -1,8 +1,9 @@
 use crate::node::tcnet_packet::{Data, Packet};
 use crate::protocol::{
-    ArtworkFileData, BeatGridHeader, BigWaveformData, Bpm, LayerId, LayerState, MixerChannel,
-    RequestData, RequestDataType, SmallWaveformData, SmpteMode, Speed,
+    ArtworkFileData, BeatGridHeader, BigWaveformData, Bpm, CueData, LayerId, LayerState,
+    MixerChannel, RequestData, RequestDataType, SmallWaveformData, SmpteMode, Speed,
 };
+use serde::Serialize;
 use std::collections::HashMap;
 use std::net::SocketAddrV4;
 use std::time::{Duration, Instant};
@@ -18,7 +19,7 @@ use tokio::sync::oneshot;
 /// republished through a triple buffer to
 /// [`DjControllerView::get_mixer`](crate::DjControllerView::get_mixer).
 /// All 8-bit level / EQ / filter fields range over `0..=255`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct MixerSnapshot {
     pub mixer_id: u8,
     pub mixer_type: u8,
@@ -100,7 +101,7 @@ impl MixerSnapshot {
 /// All 8-bit fields range over `0..=255`. `cue_a` / `cue_b` indicate
 /// headphone-cue assignment; `crossfader_assign` selects which crossfader
 /// side this channel feeds.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct ChannelSnapshot {
     pub source_select: u8,
     pub audio_level: u8,
@@ -159,7 +160,7 @@ impl From<&MixerChannel> for ChannelSnapshot {
 /// `current_time_ms` (from Time packets, updated ~20 ms) is the most
 /// frequently refreshed position field. `position_ms` (from Metrics packets,
 /// updated ~50 ms) is the same value sampled at a lower cadence.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct LayerSnapshot {
     pub source: u8,
     pub track_id: u32,
@@ -259,6 +260,10 @@ pub(crate) enum UserRequest {
         layer: LayerId,
         reply: oneshot::Sender<Result<BeatGridHeader, TimeoutError>>,
     },
+    CueData {
+        layer: LayerId,
+        reply: oneshot::Sender<Result<CueData, TimeoutError>>,
+    },
 }
 
 pub(crate) struct OutgoingRequest {
@@ -306,6 +311,7 @@ enum PendingReply {
     SmallWaveform(oneshot::Sender<Result<SmallWaveformData, TimeoutError>>),
     BigWaveform(oneshot::Sender<Result<BigWaveformData, TimeoutError>>),
     ArtworkFile(oneshot::Sender<Result<ArtworkFileData, TimeoutError>>),
+    CueData(oneshot::Sender<Result<CueData, TimeoutError>>),
     BeatGrid {
         reply: oneshot::Sender<Result<BeatGridHeader, TimeoutError>>,
         /// Per-packet payload chunks, indexed by `packet_no`. `None` for chunks
@@ -343,6 +349,9 @@ fn fire_timeout(pending: &mut Vec<PendingRequest>) {
                 }
                 PendingReply::BeatGrid { reply, .. } => {
                     let _ = reply.send(Err(TimeoutError));
+                }
+                PendingReply::CueData(tx) => {
+                    let _ = tx.send(Err(TimeoutError));
                 }
             }
         } else {
@@ -426,6 +435,23 @@ async fn dj_controller_task(
                                 let p = pending.swap_remove(i);
                                 if let PendingReply::ArtworkFile(tx) = p.reply {
                                     let _ = tx.send(Ok(a.clone()));
+                                }
+                            } else {
+                                i += 1;
+                            }
+                        }
+                    }
+                }
+                Data::Cue(c) => {
+                    if let Some(layer) = LayerId::from_packet_id(c.layer_id()) {
+                        let mut i = 0;
+                        while i < pending.len() {
+                            if pending[i].layer == layer
+                                && matches!(pending[i].reply, PendingReply::CueData(_))
+                            {
+                                let p = pending.swap_remove(i);
+                                if let PendingReply::CueData(tx) = p.reply {
+                                    let _ = tx.send(Ok(c.clone()));
                                 }
                             } else {
                                 i += 1;
@@ -590,6 +616,20 @@ async fn dj_controller_task(
                             layer_id: 0,
                             total_data_size: 0,
                         },
+                    });
+                }
+                UserRequest::CueData { layer, reply } => {
+                    let _ = outgoing_tx.send(OutgoingRequest {
+                        destination: foreign_addr,
+                        data: Data::Request(RequestData {
+                            data_type: RequestDataType::CueData,
+                            layer,
+                        }),
+                    });
+                    pending.push(PendingRequest {
+                        layer,
+                        deadline: Instant::now() + Duration::from_secs(5),
+                        reply: PendingReply::CueData(reply),
                     });
                 }
             }

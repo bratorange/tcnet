@@ -146,14 +146,14 @@ pub mod protocol;
 mod tests;
 pub mod view;
 
-pub use active_node::{ActiveDJNode, TrackMeta};
+pub use active_node::{ActiveDJNode, HotCue, TrackMeta};
 pub use node::ApplicationConfig;
 pub use node::dj_controller::{
     ChannelSnapshot, DjControllerState, LayerSnapshot, MixerSnapshot, TimeoutError,
 };
 pub use protocol::{
-    AsciiString, BeatGridEntry, BeatGridHeader, BigWaveformData, Bpm, LayerId, LayerState,
-    NodeOptions, NodeType, RequestDataType, SmallWaveformData, SmpteMode, Speed,
+    AsciiString, BeatGridEntry, BeatGridHeader, BigWaveformData, Bpm, CueData, CueEntry, LayerId,
+    LayerState, NodeOptions, NodeType, RequestDataType, SmallWaveformData, SmpteMode, Speed,
 };
 pub use view::{DjControllerView, WaveformRequester};
 

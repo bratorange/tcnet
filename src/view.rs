@@ -9,7 +9,7 @@ use crate::node::dj_controller::{
     DjControllerState, LayerSnapshot, MixerSnapshot, TimeoutError, UserRequest,
 };
 use crate::protocol::{
-    ArtworkFileData, BeatGridHeader, BigWaveformData, LayerId, SmallWaveformData,
+    ArtworkFileData, BeatGridHeader, BigWaveformData, CueData, LayerId, SmallWaveformData,
 };
 use tokio::sync::oneshot;
 
@@ -70,7 +70,18 @@ impl WaveformRequester {
             .map_err(|_| TimeoutError)?;
         rx.await.map_err(|_| TimeoutError)?
     }
+
+    /// Request the full cue table (memory cue + 17 hot-cue slots + loop
+    /// in/out) for `layer`. Times out after 5 s.
+    pub async fn request_cue_data(&self, layer: LayerId) -> Result<CueData, TimeoutError> {
+        let (tx, rx) = oneshot::channel();
+        self.request_tx
+            .send(UserRequest::CueData { layer, reply: tx })
+            .map_err(|_| TimeoutError)?;
+        rx.await.map_err(|_| TimeoutError)?
+    }
 }
+
 
 /// Read-only view of a discovered foreign TCNet DJ controller node.
 ///
@@ -142,6 +153,15 @@ impl DjControllerView {
         let (tx, rx) = oneshot::channel();
         self.request_tx
             .send(UserRequest::BeatGrid { layer, reply: tx })
+            .map_err(|_| TimeoutError)?;
+        rx.await.map_err(|_| TimeoutError)?
+    }
+
+    /// Request the full cue table for `layer`. Times out after 5 s.
+    pub async fn request_cue_data(&self, layer: LayerId) -> Result<CueData, TimeoutError> {
+        let (tx, rx) = oneshot::channel();
+        self.request_tx
+            .send(UserRequest::CueData { layer, reply: tx })
             .map_err(|_| TimeoutError)?;
         rx.await.map_err(|_| TimeoutError)?
     }

@@ -5,7 +5,7 @@ use crate::node::response_data::SharedResponseData;
 use crate::node::tcnet_packet::Data;
 use crate::protocol::{
     ArtworkFileData, AutoMasterMode, BeatGridEntry, BeatGridHeader, BigWaveformData, Bpm, CueData,
-    LayerId, LayerState, LayerStatus, LayerTimecode, MetaData, MetricsData, MixerChannel,
+    CueEntry, LayerId, LayerState, LayerStatus, LayerTimecode, MetaData, MetricsData, MixerChannel,
     MixerData, ReservedData, SmallWaveformData, SmpteMode, Speed, StatusData, TimePacketData,
 };
 use std::sync::{Arc, Mutex};
@@ -40,12 +40,58 @@ pub struct TrackMeta {
     pub track_id: u32,
 }
 
+/// One CDJ-3000-style hot cue: a track position plus an RGB pad colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct HotCue {
+    pub pos_ms: u32,
+    pub color: [u8; 3],
+}
+
+/// Per-layer cue state owned by an [`ActiveDJNode`]. Slot 0 is the [CUE]
+/// memory marker; slots 1..=8 are the A–H hot-cue pads.
+#[derive(Debug, Clone, Copy)]
+struct LayerCueState {
+    cue_marker: Option<HotCue>,
+    hot_cues: [Option<HotCue>; 8],
+    loop_in_ms: u32,
+    loop_out_ms: u32,
+}
+
+impl Default for LayerCueState {
+    fn default() -> Self {
+        Self {
+            cue_marker: None,
+            hot_cues: [None; 8],
+            loop_in_ms: 0,
+            loop_out_ms: 0,
+        }
+    }
+}
+
+impl LayerCueState {
+    fn to_cue_data(self, layer_id: u8) -> CueData {
+        let mut cues = [CueEntry::EMPTY; 18];
+        if let Some(m) = self.cue_marker {
+            cues[0] = CueEntry::new(1, m.pos_ms, m.pos_ms, m.color);
+        }
+        for (i, hc) in self.hot_cues.iter().enumerate() {
+            if let Some(hc) = hc {
+                cues[i + 1] = CueEntry::new(1, hc.pos_ms, hc.pos_ms, hc.color);
+            }
+        }
+        CueData::build(layer_id, cues, self.loop_in_ms, self.loop_out_ms)
+    }
+}
+
+
+
 // ---------------------------------------------------------------------------
 // Internal shared state
 // ---------------------------------------------------------------------------
 
 struct ActiveNodeInner {
     layers: Vec<LayerSnapshot>,
+    cue_states: Vec<LayerCueState>,
     mixer: MixerSnapshot,
 }
 
@@ -59,8 +105,13 @@ impl Default for ActiveNodeInner {
             l.bpm = Bpm((120.0 * 100.0) as u32);
             l.speed = Speed::NORMAL;
         }
+        let cue_states = LayerId::ALL
+            .iter()
+            .map(|_| LayerCueState::default())
+            .collect();
         Self {
             layers,
+            cue_states,
             mixer: MixerSnapshot::default(),
         }
     }
@@ -516,6 +567,8 @@ impl ActiveDJNode {
             l.artist = info.artist.clone();
             l.title = info.title.clone();
             l.name = info.title.clone();
+            // Clear per-track cue state.
+            inner.cue_states[layer.index()] = LayerCueState::default();
         }
 
         // Pre-build response packets so the dispatcher can answer REQUEST packets.
@@ -597,8 +650,13 @@ impl ActiveDJNode {
                 };
             }
 
-            // Cue: default at start.
-            ld.cue_packet = Some(Data::Cue(CueData::new(lid, 0)));
+            // Cue: clear all hot cues + the [CUE] memory marker on track load.
+            ld.cue_packet = Some(Data::Cue(CueData::build(
+                lid,
+                [CueEntry::EMPTY; 18],
+                0,
+                0,
+            )));
 
             // Artwork: empty placeholder.
             ld.artwork_packets = vec![Data::ArtworkFile(ArtworkFileData::new_packet(
@@ -642,6 +700,35 @@ impl ActiveDJNode {
         self.update_metrics(layer)
     }
 
+    /// Atomically update playhead position, bar-phase marker, and absolute
+    /// beat number for `layer`, broadcasting a single [`MetricsData`].
+    ///
+    /// `beat_marker` is the 0–255 position within a 4-beat bar (TCNet wire
+    /// convention; consumers map it to a beat-1-of-4 indicator with
+    /// `marker * 4 / 256`). `beat_number` is the 1-based absolute beat
+    /// counter from track start.
+    ///
+    /// Use this instead of [`set_position_ms`](Self::set_position_ms) when
+    /// the broadcaster knows the beat-grid math; emits one packet instead of
+    /// three.
+    pub fn set_layer_position(
+        &mut self,
+        layer: LayerId,
+        pos_ms: u32,
+        beat_marker: u8,
+        beat_number: u32,
+    ) -> Result<(), SendError> {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            let l = inner.layer_mut(layer);
+            l.position_ms = pos_ms;
+            l.current_time_ms = pos_ms;
+            l.beat_marker = beat_marker;
+            l.beat_number = beat_number;
+        }
+        self.update_metrics(layer)
+    }
+
     /// Set the layer's BPM (encoded as `bpm × 100` on the wire).
     pub fn set_bpm(&mut self, layer: LayerId, bpm: f32) -> Result<(), SendError> {
         self.inner.lock().unwrap().layer_mut(layer).bpm = Bpm((bpm * 100.0) as u32);
@@ -658,6 +745,51 @@ impl ActiveDJNode {
     pub fn set_sync_master(&mut self, layer: LayerId, master: bool) -> Result<(), SendError> {
         self.inner.lock().unwrap().layer_mut(layer).sync_master = master;
         self.update_metrics(layer)
+    }
+
+    // --- cue / hot cues / loop ---
+
+    /// Update the cached cue-data response for `layer` and broadcast nothing
+    /// (cue data is request/response — peers fetch it on demand).
+    fn rebuild_cue_packet(&self, layer: LayerId) {
+        let lid = layer.as_packet_id();
+        let cue_data = self.inner.lock().unwrap().cue_states[layer.index()].to_cue_data(lid);
+        if let Ok(mut rd) = self.response_data.lock() {
+            rd.layers[layer.index()].cue_packet = Some(Data::Cue(cue_data));
+        }
+    }
+
+    /// Set the persistent [CUE] memory marker for `layer`. Peers that issue a
+    /// [`RequestData`](crate::protocol::RequestData) for
+    /// [`CueData`](crate::RequestDataType::CueData) will receive the updated
+    /// cue point in slot 0 of the [`CueData`] response.
+    ///
+    /// Pass `None` to clear the marker. The slot-0 colour is fixed to CDJ
+    /// orange (RGB `255, 128, 0`).
+    pub fn set_cue_marker(&mut self, layer: LayerId, pos_ms: Option<u32>) {
+        self.inner.lock().unwrap().cue_states[layer.index()].cue_marker =
+            pos_ms.map(|p| HotCue {
+                pos_ms: p,
+                color: [255, 128, 0],
+            });
+        self.rebuild_cue_packet(layer);
+    }
+
+    /// Replace the hot-cue table for `layer` (slots A–H, indexed 0..8). `None`
+    /// entries clear the corresponding pad. Updates the cached
+    /// [`CueData`](crate::protocol::CueData) response.
+    pub fn set_hot_cues(&mut self, layer: LayerId, hot_cues: [Option<HotCue>; 8]) {
+        self.inner.lock().unwrap().cue_states[layer.index()].hot_cues = hot_cues;
+        self.rebuild_cue_packet(layer);
+    }
+
+    /// Set the layer's active loop range in milliseconds (or `(0, 0)` to
+    /// clear).
+    pub fn set_loop_range(&mut self, layer: LayerId, in_ms: u32, out_ms: u32) {
+        let cs = &mut self.inner.lock().unwrap().cue_states[layer.index()];
+        cs.loop_in_ms = in_ms;
+        cs.loop_out_ms = out_ms;
+        self.rebuild_cue_packet(layer);
     }
 
     // --- mixer ---

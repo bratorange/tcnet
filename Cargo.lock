@@ -938,6 +938,7 @@ dependencies = [
  "getifs",
  "kanal",
  "log",
+ "serde",
  "serial_test",
  "tokio",
  "triple_buffer",
