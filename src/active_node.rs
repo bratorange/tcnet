@@ -433,8 +433,26 @@ impl ActiveDJNode {
                         let _ = tcast.try_send(data);
                     }
                     _ = status_tick.tick() => {
-                        let data = inner_bg.lock().unwrap().build_status_packet();
-                        let _ = bcast.try_send(data);
+                        let inner = inner_bg.lock().unwrap();
+                        let status = inner.build_status_packet();
+                        let _ = bcast.try_send(status);
+                        // Re-unicast a Meta packet for every layer that
+                        // currently holds a track. Meta is otherwise
+                        // only sent once at `load_track`, so a slave
+                        // node that joined *after* the load never
+                        // learns the artist / title (only the 16-byte
+                        // `layer_N_name` from Status broadcasts). The
+                        // 1 Hz cadence is cheap and lets late-joining
+                        // slaves catch up within a second.
+                        for &id in LayerId::ALL.iter() {
+                            if inner.layer(id).track_id != 0 {
+                                let meta = inner.build_meta_packet(id);
+                                if let Ok(mut rd) = rd_bg.lock() {
+                                    rd.layers[id.index()].last_meta = Some(meta.clone());
+                                }
+                                let _ = sucast.try_send(meta);
+                            }
+                        }
                     }
                     _ = metrics_tick.tick() => {
                         let inner = inner_bg.lock().unwrap();

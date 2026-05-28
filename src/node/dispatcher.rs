@@ -112,6 +112,7 @@ fn is_dj_packet(data: &Data) -> bool {
         data,
         Data::Status(_)
             | Data::Metrics(_)
+            | Data::Meta(_)
             | Data::BeatGrid(_)
             | Data::Cue(_)
             | Data::SmallWaveform(_)
