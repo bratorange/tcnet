@@ -469,22 +469,35 @@ fn test_request_response() {
     send_packet(&viewer, dest, h, d);
     sleep(Duration::from_millis(150));
 
-    // Receive REQUEST-response packets, skipping proactive broadcasts (OptIn/OptOut/Time/Status).
-    let recv_packets = |expected: usize| -> Vec<crate::node::tcnet_packet::Data> {
+    // Receive REQUEST-response packets, skipping proactive broadcasts
+    // (OptIn/OptOut/Time/Status/Meta/Metrics — the latter two are now
+    // re-broadcast once a track is loaded, see
+    // test_metrics_broadcast_for_stopped_layer). The skip set excludes
+    // whatever variant the test is currently asserting on.
+    let recv_packets = |expected: usize, want: RequestDataType|
+        -> Vec<crate::node::tcnet_packet::Data> {
         use crate::node::tcnet_packet::Data as D;
+        let matches_want = |d: &D| match (d, want) {
+            (D::Metrics(_), RequestDataType::MetricsData) => true,
+            (D::Meta(_), RequestDataType::MetaData) => true,
+            (D::BeatGrid(_), RequestDataType::BeatGridData) => true,
+            (D::Cue(_), RequestDataType::CueData) => true,
+            (D::SmallWaveform(_), RequestDataType::SmallWaveformData) => true,
+            (D::BigWaveform(_), RequestDataType::LargeWaveformData) => true,
+            (D::ArtworkFile(_), RequestDataType::LowResArtworkFile) => true,
+            (D::Mixer(_), RequestDataType::MixerData) => true,
+            _ => false,
+        };
         let mut collected = Vec::new();
         let mut buf = [0u8; 8192];
         loop {
             match viewer.recv_from(&mut buf) {
                 Ok((size, _)) => {
                     if let Ok(pkt) = Packet::deserialize_packet(&buf[..size]) {
-                        match pkt.data {
-                            D::OptIn(_) | D::OptOut(_) | D::Time(_) | D::Status(_) => {}
-                            data => {
-                                collected.push(data);
-                                if collected.len() >= expected {
-                                    break;
-                                }
+                        if matches_want(&pkt.data) {
+                            collected.push(pkt.data);
+                            if collected.len() >= expected {
+                                break;
                             }
                         }
                     }
@@ -507,7 +520,7 @@ fn test_request_response() {
 
     // MetricsData
     send_req(RequestDataType::MetricsData);
-    let pkts = recv_packets(1);
+    let pkts = recv_packets(1, RequestDataType::MetricsData);
     assert!(
         matches!(
             pkts.first(),
@@ -519,7 +532,7 @@ fn test_request_response() {
 
     // MetaData
     send_req(RequestDataType::MetaData);
-    let pkts = recv_packets(1);
+    let pkts = recv_packets(1, RequestDataType::MetaData);
     assert!(
         matches!(pkts.first(), Some(crate::node::tcnet_packet::Data::Meta(_))),
         "MetaData response: {:?}",
@@ -528,7 +541,7 @@ fn test_request_response() {
 
     // BeatGridData
     send_req(RequestDataType::BeatGridData);
-    let pkts = recv_packets(1);
+    let pkts = recv_packets(1, RequestDataType::BeatGridData);
     assert!(
         matches!(
             pkts.first(),
@@ -540,7 +553,7 @@ fn test_request_response() {
 
     // CueData
     send_req(RequestDataType::CueData);
-    let pkts = recv_packets(1);
+    let pkts = recv_packets(1, RequestDataType::CueData);
     assert!(
         matches!(pkts.first(), Some(crate::node::tcnet_packet::Data::Cue(_))),
         "CueData response: {:?}",
@@ -549,7 +562,7 @@ fn test_request_response() {
 
     // SmallWaveformData
     send_req(RequestDataType::SmallWaveformData);
-    let pkts = recv_packets(1);
+    let pkts = recv_packets(1, RequestDataType::SmallWaveformData);
     assert!(
         matches!(
             pkts.first(),
@@ -561,7 +574,7 @@ fn test_request_response() {
 
     // LargeWaveformData
     send_req(RequestDataType::LargeWaveformData);
-    let pkts = recv_packets(1);
+    let pkts = recv_packets(1, RequestDataType::LargeWaveformData);
     assert!(
         matches!(
             pkts.first(),
@@ -573,7 +586,7 @@ fn test_request_response() {
 
     // LowResArtworkFile (empty placeholder)
     send_req(RequestDataType::LowResArtworkFile);
-    let pkts = recv_packets(1);
+    let pkts = recv_packets(1, RequestDataType::LowResArtworkFile);
     assert!(
         matches!(
             pkts.first(),
@@ -585,7 +598,7 @@ fn test_request_response() {
 
     // MixerData
     send_req(RequestDataType::MixerData);
-    let pkts = recv_packets(1);
+    let pkts = recv_packets(1, RequestDataType::MixerData);
     assert!(
         matches!(
             pkts.first(),
@@ -764,4 +777,104 @@ fn test_loopback_discovery() {
         .get_any_controller_view()
         .expect("DjControllerView not available after Metrics — loopback discovery broken");
     assert_eq!(view.get_layers()[0].bpm.0, TRACK_1_BPM, "BPM mismatch");
+}
+
+// ---------------------------------------------------------------------------
+// Metrics-for-stopped-layer regression test
+// ---------------------------------------------------------------------------
+// Reproduces the bug where a slave that joined *after* a track was loaded but
+// never started playing would see `track_length_ms = 0` and `bpm = 0` for
+// that deck — because the active node only re-broadcast MetricsData for
+// `state.is_playing()` layers, and MetaData (the only repeat-broadcast that
+// covered loaded-but-stopped decks) does not carry track length or BPM.
+//
+// The fix re-broadcasts MetricsData for every layer with `track_id != 0`
+// regardless of play state. This test pins that behaviour so a future
+// "optimisation" can't quietly bring the bug back.
+
+#[test]
+#[serial]
+fn test_metrics_broadcast_for_stopped_layer() {
+    use crate::active_node::TrackMeta;
+    use crate::node::tcnet_packet::{Data, Packet};
+
+    let _ = env_logger::try_init();
+
+    // Master node — loads a track on L1 but does NOT play it.
+    let mut master_cfg = ApplicationConfig::default();
+    master_cfg.node_type = NodeType::Master;
+    let master_client = TCNetClient::new(master_cfg);
+    let mut active = master_client.create_active_node();
+    sleep(Duration::from_millis(400));
+
+    const STOPPED_BPM: f32 = 128.0;
+    const STOPPED_LEN_MS: u32 = 240_000;
+    const STOPPED_TRACK_ID: u32 = 77;
+    active
+        .load_track(
+            LayerId::L1,
+            TrackMeta {
+                title: "Stopped Track".into(),
+                artist: "Test Artist".into(),
+                duration_ms: STOPPED_LEN_MS,
+                bpm: STOPPED_BPM,
+                track_id: STOPPED_TRACK_ID,
+            },
+        )
+        .expect("load_track failed");
+    // No `play()` call — the deck stays in `LayerState::Stopped`.
+
+    // Slave viewer registers via OptIn AFTER the load. This mirrors the
+    // real-world scenario where luchs starts after the simulator already
+    // has a track loaded.
+    let viewer = UdpSocket::bind("127.0.0.1:0").expect("bind viewer");
+    viewer
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let viewer_port = viewer.local_addr().unwrap().port();
+    let viewer_cfg = ApplicationConfig {
+        node_type: NodeType::Slave,
+        address: SocketAddrV4::new(Ipv4Addr::LOCALHOST, viewer_port),
+        ..master_cfg
+    };
+    let dest: SocketAddr = "127.0.0.1:60000".parse().unwrap();
+    let (h, d) = opt_in_bytes(&viewer_cfg, 0);
+    send_packet(&viewer, dest, h, d);
+
+    // Listen for at least one Metrics packet for L1. The metrics_tick fires
+    // every 50 ms, so a 1-second window is comfortably long enough.
+    let mut buf = [0u8; 8192];
+    let mut metrics: Option<MetricsData> = None;
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    while metrics.is_none() && std::time::Instant::now() < deadline {
+        match viewer.recv_from(&mut buf) {
+            Ok((size, _)) => {
+                if let Ok(pkt) = Packet::deserialize_packet(&buf[..size]) {
+                    if let Data::Metrics(m) = pkt.data {
+                        if m.layer_id == LayerId::L1.as_packet_id() {
+                            metrics = Some(m);
+                        }
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    let m = metrics.expect(
+        "No MetricsData received for stopped L1 layer — \
+         active node is filtering by is_playing() again and slaves that \
+         join after the load will never learn track_length / bpm.",
+    );
+    assert_eq!(m.layer_state, LayerState::Stopped, "layer must be Stopped");
+    assert_eq!(
+        m.track_length, STOPPED_LEN_MS,
+        "track_length must be carried in the broadcast Metrics"
+    );
+    assert_eq!(
+        m.bpm,
+        (STOPPED_BPM * 100.0) as u32,
+        "bpm must be carried in the broadcast Metrics"
+    );
+    assert_eq!(m.track_id, STOPPED_TRACK_ID, "track_id must match the loaded track");
 }

@@ -455,9 +455,21 @@ impl ActiveDJNode {
                         }
                     }
                     _ = metrics_tick.tick() => {
+                        // Send Metrics for every layer that carries a track,
+                        // not just playing ones. Real CDJs broadcast their
+                        // current state (track length, BPM, sync master)
+                        // even when stopped/paused/cued — otherwise a
+                        // slave that joined *after* the load (or after the
+                        // last state transition) would never learn the
+                        // track's length or BPM, because `MetaData` only
+                        // carries title/artist. Without this every
+                        // not-currently-playing deck reads as
+                        // `track_length_ms=0, bpm=0` on the slave, which
+                        // breaks every downstream consumer (analysis,
+                        // playhead, BPM-derived bar grid, …).
                         let inner = inner_bg.lock().unwrap();
                         for &id in LayerId::ALL.iter() {
-                            if inner.layer(id).state.is_playing() {
+                            if inner.layer(id).track_id != 0 {
                                 let data = inner.build_metrics_packet(id);
                                 if let Ok(mut rd) = rd_bg.lock() {
                                     rd.layers[id.index()].last_metrics = Some(data.clone());
