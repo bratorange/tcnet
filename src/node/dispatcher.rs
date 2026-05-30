@@ -14,6 +14,7 @@ use log::{error, info, trace, warn};
 use std::collections::HashSet;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use arc_swap::ArcSwap;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -39,11 +40,12 @@ pub struct Dispatcher {
     pub(crate) active_time_rx: kanal::Receiver<Data>,
     /// Shared store for pre-built request-response payloads.
     pub(crate) response_data: SharedResponseData,
-    /// Broadcast destinations for OptIn / OptOut. Populated by `broadcast()`
-    /// on start-up so that a synchronous `Drop` impl can reuse the same
-    /// fan-out (including the loopback fallback) without re-running
-    /// `best_local_ipv4_addrs`.
-    pub(crate) broadcast_targets: Mutex<Vec<SocketAddrV4>>,
+    /// Broadcast destinations for OptIn / OptOut. Published by `broadcast()`
+    /// at start-up so a synchronous `Drop` impl can reuse the same fan-out
+    /// (including the loopback fallback) without re-running
+    /// `best_local_ipv4_addrs`. Single writer / many readers — wait-free
+    /// via `ArcSwap` instead of a `Mutex`.
+    pub(crate) broadcast_targets: ArcSwap<Vec<SocketAddrV4>>,
 }
 
 /// Try to bind a UDP socket at `preferred_port`, incrementing until a free port is found.
@@ -403,9 +405,10 @@ async fn broadcast(dispatcher: Arc<Dispatcher>, broadcast_socket: Arc<UdpSocket>
     }
     // Publish the broadcast destinations on the dispatcher so that the
     // sync `Drop` impl in lib.rs can fan an OptOut packet to the same set.
-    if let Ok(mut targets) = dispatcher.broadcast_targets.lock() {
-        *targets = ipv4_addrs.iter().copied().collect();
-    }
+    // Wait-free atomic swap — no lock.
+    dispatcher
+        .broadcast_targets
+        .store(Arc::new(ipv4_addrs.iter().copied().collect()));
     info!("Broadcasting opt in packets to {:?}", ipv4_addrs);
     let mut tick = interval(Duration::from_secs(1));
     loop {

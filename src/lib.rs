@@ -251,7 +251,7 @@ impl TCNetClient {
             active_slave_unicast_rx,
             active_time_rx,
             response_data: response_data.clone(),
-            broadcast_targets: Mutex::new(Vec::new()),
+            broadcast_targets: arc_swap::ArcSwap::from_pointee(Vec::new()),
         });
 
         runtime.spawn(start_node(dispatcher.clone()));
@@ -359,12 +359,8 @@ impl Drop for TCNetClient {
         let unicast_port = self.dispatcher.actual_unicast_port.load(Ordering::Relaxed);
 
         // Snapshot broadcast destinations + discovered nodes.
-        let bcast_targets: Vec<std::net::SocketAddrV4> = self
-            .dispatcher
-            .broadcast_targets
-            .lock()
-            .map(|v| v.clone())
-            .unwrap_or_default();
+        // Wait-free load of the broadcast destination snapshot.
+        let bcast_targets = self.dispatcher.broadcast_targets.load_full();
         let unicast_targets: Vec<std::net::SocketAddrV4> = self._runtime.block_on(async {
             let state = self.dispatcher.state.read().await;
             state.discovered_nodes.values().map(|n| n.address).collect()
