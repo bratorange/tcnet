@@ -167,6 +167,32 @@ impl<V: SpecVersion> Node<Slave, V> {
         Some(view.get_mixer().clone())
     }
 
+    /// Escape hatch: get a legacy [`DjControllerView`](crate::DjControllerView)
+    /// for `addr`, whose [`WaveformRequester`](crate::WaveformRequester) is
+    /// `Send + 'static` and can be moved into a `tokio::spawn`ed
+    /// background task.
+    ///
+    /// Prefer [`Node::request_small_waveform`] / `request_big_waveform`
+    /// / `request_beat_grid` / `request_cue_data` for inline awaits.
+    /// Use this only when you need a `'static` requester handle that
+    /// outlives a borrow of `&mut Node`.
+    ///
+    /// Returns `None` if no controller is associated with `addr`, *or*
+    /// if the view has already been taken for this peer — each peer's
+    /// triple buffer is consumable once, per
+    /// [`TCNetClient::get_controller_view`](crate::TCNetClient::get_controller_view)
+    /// semantics.
+    ///
+    /// Slated for removal in 0.3.0 when `Node::pending_*` futures land
+    /// to replace the spawn-into-background pattern with a
+    /// `'static`-friendly `Pending<T>`.
+    pub fn legacy_controller_view(
+        &mut self,
+        addr: SocketAddrV4,
+    ) -> Option<crate::DjControllerView> {
+        self.client.get_controller_view(addr)
+    }
+
     /// Request a small (low-res) waveform from `addr` for `layer`.
     /// Returns `Err(RequestTimeout)` if no response arrives within 5 s.
     pub async fn request_small_waveform(
