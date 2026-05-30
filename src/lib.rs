@@ -149,6 +149,7 @@ pub mod protocol;
 pub mod spec_version;
 #[cfg(test)]
 mod tests;
+pub mod transport;
 pub mod view;
 
 pub use active_node::{ActiveDJNode, HotCue, TrackMeta};
