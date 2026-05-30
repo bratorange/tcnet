@@ -146,6 +146,7 @@ use tokio::sync::RwLock;
 pub mod active_node;
 mod node;
 pub mod protocol;
+pub mod spec_version;
 #[cfg(test)]
 mod tests;
 pub mod view;
@@ -158,6 +159,18 @@ pub use node::dj_controller::{
 pub use protocol::{
     AsciiString, BeatGridEntry, BeatGridHeader, BigWaveformData, Bpm, CueData, CueEntry, LayerId,
     LayerState, NodeOptions, NodeType, RequestDataType, SmallWaveformData, SmpteMode, Speed,
+    WireError,
+};
+pub use spec_version::{
+    Flame, IncludesFlame, PeerVersion, SpecVersion,
+    // Versions
+    V1_0, V2_0, V2_1, V3_0, V3_1, V3_2, V3_3, V3_3_1, V3_3_2, V3_3_3, V3_4_1, V3_4_2, V3_5,
+    V3_5_1, V3_6,
+    // Flames
+    ArtworkFileFlame, BaseFlame, BcolorExplanationFlame, BeatGridInfoFlame, CueDataFlame,
+    CueExtendedFlame, FaderOnAirFlame, LayerNameFlame, MetadataUtf16Flame, MixerDataFlame,
+    MixerExtendedFlame, NodeOptionsFlame, OptInVendorFlame, SmallBigWaveformFlame,
+    SmpteInTimePacketFlame, UnicastOptInOutFlame,
 };
 pub use view::{DjControllerView, WaveformRequester};
 
