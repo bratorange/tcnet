@@ -1394,6 +1394,65 @@ pub struct AppSpecificData {
     data: Vec<u8>, // Data
 }
 
+impl AppSpecificData {
+    /// Build an AppSpecific packet from a single-packet payload.
+    /// Use [`AppSpecificData::new_chunk`] for multi-packet sequences.
+    pub fn new_single(identifier: [u8; 2], data: Vec<u8>) -> Self {
+        Self {
+            data_identifier_1: identifier[0],
+            data_identifier_2: identifier[1],
+            data_size: data.len() as u32,
+            total_packets: 1,
+            packet_no: 0,
+            packet_signature: APP_SPECIFIC_SIGNATURE,
+            data,
+        }
+    }
+
+    /// Build one chunk of a multi-packet AppSpecific response.
+    pub fn new_chunk(
+        identifier: [u8; 2],
+        chunk_bytes: Vec<u8>,
+        packet_no: u32,
+        total_packets: u32,
+        data_size: u32,
+    ) -> Self {
+        Self {
+            data_identifier_1: identifier[0],
+            data_identifier_2: identifier[1],
+            data_size,
+            total_packets,
+            packet_no,
+            packet_signature: APP_SPECIFIC_SIGNATURE,
+            data: chunk_bytes,
+        }
+    }
+
+    /// Application identifier pair as carried on the wire.
+    pub fn identifier(&self) -> [u8; 2] {
+        [self.data_identifier_1, self.data_identifier_2]
+    }
+    pub fn data_size(&self) -> u32 {
+        self.data_size
+    }
+    pub fn total_packets(&self) -> u32 {
+        self.total_packets
+    }
+    pub fn packet_no(&self) -> u32 {
+        self.packet_no
+    }
+    pub fn packet_signature(&self) -> u32 {
+        self.packet_signature
+    }
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+}
+
+/// Magic signature every AppSpecific chunk must carry to be valid
+/// per spec page 28.
+pub const APP_SPECIFIC_SIGNATURE: u32 = 178_260_640;
+
 /// SMPTE timecode for a single layer (one row inside [`TimePacketData`]).
 ///
 /// `state` follows: `0 = Stopped`, `1 = Running`, `2 = Force Resync`.

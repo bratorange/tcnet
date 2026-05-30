@@ -18,12 +18,16 @@
 //! * `request` — typed `Pending<T>` futures (phase 5.6).
 //! * `error_notif` — `ErrorNotification` routing (phase 5.7).
 
+pub mod app_specific;
 pub mod chunked;
 pub mod control;
 pub mod keyboard;
 pub mod text;
 pub mod time_sync;
 
+pub use app_specific::{
+    AppSpecificError, AppSpecificFrame, AppSpecificOutcome, AppSpecificReassembler,
+};
 pub use chunked::{AcceptOutcome, ChunkedFrame, ChunkedPayload, MismatchReason};
 pub use control::{ControlPath, SourceId};
 pub use keyboard::KeyPress;
