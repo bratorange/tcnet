@@ -515,6 +515,7 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
                                         let reply = crate::proto::TimeSyncReply {
                                             echoed_our_ts_us: ts.remote_timestamp(),
                                             their_listener_port: ts.node_listener_port(),
+                                            responder_send_ts_us: packet.header.timestamp,
                                         };
                                         match pending.accept(reply, std::time::Instant::now()) {
                                             Ok(offset) => {
