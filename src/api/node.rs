@@ -2,127 +2,266 @@
 //!
 //! This module is the type-system payoff of phases 1-7: the layered
 //! design (wire / transport / session / proto / domain / runtime)
-//! manifests above the line as a single `Node<R: Role, V: SpecVersion>`
-//! handle, parameterised on the local role and spec version.
+//! manifests above the line as a single
+//! `Node<R: Role, V: SpecVersion>` handle, parameterised on the local
+//! role and spec version.  Internally `Node` wraps the legacy
+//! [`TCNetClient`](crate::TCNetClient) engine for now — the public
+//! surface is the typed shape; the implementation will migrate to
+//! `SessionTask` + `UdpTransport` incrementally.
 //!
 //! The methods enforced at the type level:
 //!
-//! * `Node<Slave, V>` — `discover`, `snapshot`, `request_*`, `leave`.
-//! * `Node<Master, V>` — Slave methods plus `broadcast_*` /
-//!   `set_layer_metrics`.
-//! * `Node<Auto, V>` — Slave methods plus `.wait_election()` which
-//!   resolves into `Node<Master, V>` or `Node<Slave, V>`.
-//! * `with_late_field()`-style builder methods require
-//!   `V: IncludesFlame<F>` so a `Node<Master, V3_3_2>` can't emit a
-//!   field that was added in `V3_4_1`.
-//!
-//! ## Current state
-//!
-//! The type surface lands in 0.2.0; the internal wiring through
-//! [`SessionTask`](crate::session) + [`UdpTransport`](crate::transport)
-//! + [`SnapshotWriter`](crate::domain) ships incrementally.  Callers
-//! that want the full behaviour today should keep using
-//! [`TCNetClient`](crate::TCNetClient) until 0.3.0; the typed surface
-//! is here so downstream code can start migrating its *signatures*
-//! ahead of the wiring switch-over.
+//! * `Node<Slave, V>` — `snapshot`, `layers_for`, `mixer_for`,
+//!   `request_*`, `leave`.
+//! * `Node<Master, V>` — derefs to
+//!   [`ActiveDJNode`](crate::ActiveDJNode), so every broadcast / set
+//!   method on the active node is reachable through the typed handle.
+//! * `Node<Auto, V>` — Slave methods plus a `.wait_election()` future
+//!   that resolves into `Node<Master, V>` or `Node<Slave, V>`
+//!   (implementation deferred — see crate-level docs).
 
-use super::roles::{Auto, Master, Role, Slave};
-use crate::session::{SessionHandle, SessionSnapshot};
+use super::roles::{Master, Role, Slave};
+use crate::node::dj_controller::{LayerSnapshot, MixerSnapshot, TimeoutError};
+use crate::protocol::{BeatGridHeader, BigWaveformData, CueData, LayerId, NodeId, SmallWaveformData};
 use crate::spec_version::SpecVersion;
+use crate::{ActiveDJNode, ApplicationConfig, ForeignNodeInfo, TCNetClient};
 use std::marker::PhantomData;
-use std::sync::Arc;
+use std::net::SocketAddrV4;
+
+/// One foreign-node row in [`NodeSnapshot::peers`].
+///
+/// Direct replacement for the legacy [`ForeignNodeInfo`] —
+/// re-exposed at the typed surface so downstream code doesn't have
+/// to reach into the engine module.
+#[derive(Clone, Debug)]
+pub struct PeerInfo {
+    /// The peer's listener address (IP + unicast port).
+    pub address: SocketAddrV4,
+    /// Wall-clock UNIX-seconds timestamp of the last packet from this peer.
+    pub last_seen: u64,
+    /// The peer's 16-bit node identifier.
+    pub node_id: NodeId,
+    /// `true` once any DJ packet has been observed from this peer,
+    /// meaning [`Node::layers_for`] / [`Node::mixer_for`] /
+    /// `request_*` methods will return data.
+    pub has_dj_controller: bool,
+}
+
+impl From<ForeignNodeInfo> for PeerInfo {
+    fn from(f: ForeignNodeInfo) -> Self {
+        Self {
+            address: f.address,
+            last_seen: f.last_seen,
+            node_id: f.node_id,
+            has_dj_controller: f.has_dj_controller,
+        }
+    }
+}
+
+/// Read-only snapshot of the local node's view of the TCNet network.
+///
+/// Returned by [`Node::snapshot`].  Cheap to drop; iterate over
+/// `peers` to find the foreign nodes you care about.
+#[derive(Clone, Debug, Default)]
+pub struct NodeSnapshot {
+    pub peers: Vec<PeerInfo>,
+}
 
 /// Anything the [`Node`] API can fail at.
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum NodeError {
-    /// `Node::join` couldn't bring the transport up.
-    JoinFailed {
-        source: crate::transport::TransportError,
-    },
+    /// `Node::join` couldn't bring the runtime / dispatcher up.
+    JoinFailed { reason: String },
     /// `Node::leave` couldn't broadcast OptOut.
     LeaveFailed,
+    /// A request (waveform / beat-grid / cue / artwork) timed out
+    /// after 5 s, or the underlying request channel closed.
+    RequestTimeout,
+    /// A request was made for a peer that doesn't currently have a
+    /// DjController (e.g. `has_dj_controller == false`).
+    PeerHasNoController { addr: SocketAddrV4 },
 }
 
 impl std::fmt::Display for NodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::JoinFailed { source } => write!(f, "Node::join failed: {}", source),
+            Self::JoinFailed { reason } => write!(f, "Node::join failed: {}", reason),
             Self::LeaveFailed => f.write_str("Node::leave failed"),
+            Self::RequestTimeout => f.write_str("request timed out"),
+            Self::PeerHasNoController { addr } => {
+                write!(f, "peer {} has no DjController yet", addr)
+            }
         }
     }
 }
 
-impl std::error::Error for NodeError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::JoinFailed { source } => Some(source),
-            _ => None,
-        }
+impl std::error::Error for NodeError {}
+
+impl From<TimeoutError> for NodeError {
+    fn from(_: TimeoutError) -> Self {
+        Self::RequestTimeout
     }
 }
 
 /// The typed handle to a running TCNet node.
 ///
-/// `R` is the role marker ([`Slave`] / [`Master`] / [`Auto`] /
-/// [`Repeater`](super::roles::Repeater)); `V` is the
+/// `R` is the role marker ([`Slave`] / [`Master`] / [`Auto`](super::roles::Auto)
+/// / [`Repeater`](super::roles::Repeater)); `V` is the
 /// [`SpecVersion`](crate::SpecVersion) the local node emits at.
 ///
-/// Cheap to clone — internally an `Arc` to the running session +
-/// transport.
+/// Owned, not `Clone`: each `Node` corresponds to a unique set of
+/// bound sockets + tokio runtime.  Pass `&mut Node<…>` through your
+/// call graph if you need write access (every `set_*` /
+/// `broadcast_*` method requires it), or `&Node<…>` for read-only
+/// access (snapshot, request_*).
 pub struct Node<R: Role, V: SpecVersion> {
-    inner: Arc<NodeInner>,
+    client: TCNetClient,
+    active: Option<ActiveDJNode>,
     _r: PhantomData<R>,
     _v: PhantomData<V>,
 }
 
-struct NodeInner {
-    session: SessionHandle,
-    // transport + domain writer go here once the wiring lands.
-}
-
 impl<R: Role, V: SpecVersion> Node<R, V> {
-    /// Wait-free read of the latest published peer-state snapshot.
-    pub fn snapshot(&self) -> Arc<SessionSnapshot> {
-        self.inner.session.snapshot()
+    /// Wait-free snapshot of the foreign-peer set discovered by
+    /// OptIn / OptOut + DJ-packet traffic.
+    pub fn snapshot(&self) -> NodeSnapshot {
+        NodeSnapshot {
+            peers: self
+                .client
+                .nodes_snapshot_arc()
+                .iter()
+                .cloned()
+                .map(PeerInfo::from)
+                .collect(),
+        }
     }
 
-    /// Cleanly leave the network.  Consumes `self` to make the
-    /// post-leave handle unreachable.
-    ///
-    /// Today this just shuts the session task down; the eventual
-    /// implementation broadcasts an OptOut packet first.
+    /// Cleanly leave the network.  Consumes `self` — the legacy
+    /// engine's `Drop` already broadcasts a best-effort OptOut, so
+    /// this just lets it run.
     pub async fn leave(self) -> Result<(), NodeError> {
-        self.inner.session.shutdown();
+        drop(self);
         Ok(())
     }
+
+    /// Access to the local node's configured identity.
+    pub fn config(&self) -> ApplicationConfig {
+        self.client.node_config()
+    }
 }
 
-// Slave-specific methods.  Every role gets these via
-// `impl<R: Role, V> Node<R, V>` above; `impl<V> Node<Slave, V>` only
-// exists to mark which methods are role-specific.
-impl<V: SpecVersion> Node<Slave, V> {}
+// Slave-specific read methods.
+impl<V: SpecVersion> Node<Slave, V> {
+    /// All eight [`LayerSnapshot`]s for the foreign DJ controller at
+    /// `addr`, or `None` if no controller is associated with that
+    /// peer.
+    pub fn layers_for(&mut self, addr: SocketAddrV4) -> Option<Vec<LayerSnapshot>> {
+        let mut view = self.client.get_controller_view(addr)?;
+        Some(view.get_layers().to_vec())
+    }
 
-// Master adds broadcast methods; details land with the wiring.
-impl<V: SpecVersion> Node<Master, V> {}
+    /// [`MixerSnapshot`] for the foreign DJ controller at `addr`.
+    pub fn mixer_for(&mut self, addr: SocketAddrV4) -> Option<MixerSnapshot> {
+        let mut view = self.client.get_controller_view(addr)?;
+        Some(view.get_mixer().clone())
+    }
 
-// Auto exposes `.wait_election()` resolving into Master or Slave.
-impl<V: SpecVersion> Node<Auto, V> {}
+    /// Request a small (low-res) waveform from `addr` for `layer`.
+    /// Returns `Err(RequestTimeout)` if no response arrives within 5 s.
+    pub async fn request_small_waveform(
+        &mut self,
+        addr: SocketAddrV4,
+        layer: LayerId,
+    ) -> Result<SmallWaveformData, NodeError> {
+        let view = self
+            .client
+            .get_controller_view(addr)
+            .ok_or(NodeError::PeerHasNoController { addr })?;
+        let requester = view.waveform_requester();
+        requester
+            .request_small_waveform(layer)
+            .await
+            .map_err(Into::into)
+    }
 
-impl<R: Role, V: SpecVersion> Clone for Node<R, V> {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-            _r: PhantomData,
-            _v: PhantomData,
-        }
+    /// Request the full big-waveform multi-packet response from
+    /// `addr` for `layer`.
+    pub async fn request_big_waveform(
+        &mut self,
+        addr: SocketAddrV4,
+        layer: LayerId,
+    ) -> Result<BigWaveformData, NodeError> {
+        let view = self
+            .client
+            .get_controller_view(addr)
+            .ok_or(NodeError::PeerHasNoController { addr })?;
+        let requester = view.waveform_requester();
+        requester
+            .request_big_waveform(layer)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Request the multi-packet BeatGrid response.
+    pub async fn request_beat_grid(
+        &mut self,
+        addr: SocketAddrV4,
+        layer: LayerId,
+    ) -> Result<BeatGridHeader, NodeError> {
+        let view = self
+            .client
+            .get_controller_view(addr)
+            .ok_or(NodeError::PeerHasNoController { addr })?;
+        let requester = view.waveform_requester();
+        requester
+            .request_beat_grid(layer)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Request the cue-data response.
+    pub async fn request_cue_data(
+        &mut self,
+        addr: SocketAddrV4,
+        layer: LayerId,
+    ) -> Result<CueData, NodeError> {
+        let view = self
+            .client
+            .get_controller_view(addr)
+            .ok_or(NodeError::PeerHasNoController { addr })?;
+        let requester = view.waveform_requester();
+        requester.request_cue_data(layer).await.map_err(Into::into)
+    }
+}
+
+// Master-specific deref into ActiveDJNode so every set_* / load_track
+// / broadcast method lights up on `&mut Node<Master, V>`.
+impl<V: SpecVersion> std::ops::Deref for Node<Master, V> {
+    type Target = ActiveDJNode;
+    fn deref(&self) -> &Self::Target {
+        self.active
+            .as_ref()
+            .expect("Node<Master, _> always has an ActiveDJNode")
+    }
+}
+
+impl<V: SpecVersion> std::ops::DerefMut for Node<Master, V> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.active
+            .as_mut()
+            .expect("Node<Master, _> always has an ActiveDJNode")
     }
 }
 
 /// Internal constructor used by [`NodeBuilder`](super::NodeBuilder).
-pub(crate) fn from_session<R: Role, V: SpecVersion>(session: SessionHandle) -> Node<R, V> {
+pub(crate) fn from_engine<R: Role, V: SpecVersion>(
+    client: TCNetClient,
+    active: Option<ActiveDJNode>,
+) -> Node<R, V> {
     Node {
-        inner: Arc::new(NodeInner { session }),
+        client,
+        active,
         _r: PhantomData,
         _v: PhantomData,
     }
@@ -132,19 +271,25 @@ pub(crate) fn from_session<R: Role, V: SpecVersion>(session: SessionHandle) -> N
 mod tests {
     use super::*;
     use crate::V3_6;
-    use crate::session::SessionTask;
 
     #[test]
     fn node_is_send_sync() {
         fn _ss<T: Send + Sync>() {}
         _ss::<Node<Slave, V3_6>>();
+        _ss::<Node<Master, V3_6>>();
     }
 
-    #[tokio::test]
-    async fn snapshot_load_from_typed_node() {
-        let (_task, handle) = SessionTask::new_default();
-        let n: Node<Slave, V3_6> = from_session(handle);
-        let snap = n.snapshot();
-        assert_eq!(snap.peers.len(), 0);
+    #[test]
+    fn peer_info_round_trips_from_foreign_node_info() {
+        let f = ForeignNodeInfo {
+            address: SocketAddrV4::new(std::net::Ipv4Addr::new(192, 168, 1, 10), 65023),
+            last_seen: 12345,
+            node_id: 7,
+            has_dj_controller: true,
+        };
+        let p: PeerInfo = f.into();
+        assert_eq!(p.node_id, 7);
+        assert_eq!(p.last_seen, 12345);
+        assert!(p.has_dj_controller);
     }
 }

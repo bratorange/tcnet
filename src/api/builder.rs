@@ -1,15 +1,15 @@
 //! `NodeBuilder` — fluent construction of typed `Node<R, V>` handles.
 //!
-//! Sensible defaults hide the Arc / atomic / transport choices the
-//! library user shouldn't have to think about (matching the
-//! "convenience stays inside the lib" constraint).  Override any
-//! field via the builder fluent methods.
+//! Hides the legacy `TCNetClient` + `ActiveDJNode` engine plumbing
+//! behind a sensibly-defaulted builder so library users don't have
+//! to think about the runtime / dispatcher / sockets — matching the
+//! "convenience stays inside the lib" architectural constraint.
 
-use super::node::{Node, NodeError, from_session};
-use super::roles::Role;
-use crate::ApplicationConfig;
-use crate::session::SessionTask;
+use super::node::{Node, NodeError, from_engine};
+use super::roles::{Master, Role};
 use crate::spec_version::SpecVersion;
+use crate::{ApplicationConfig, TCNetClient};
+use std::any::TypeId;
 use std::marker::PhantomData;
 use std::net::Ipv4Addr;
 
@@ -19,14 +19,13 @@ use std::net::Ipv4Addr;
 /// type parameters), then chain `.with_*` methods, then `.spawn()`.
 ///
 /// ```no_run
-/// use tcnet::api::{NodeBuilder, roles::Slave};
+/// use tcnet::api::{NodeBuilder, Slave};
 /// use tcnet::V3_6;
 ///
-/// # async fn _doc() -> Result<(), Box<dyn std::error::Error>> {
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let node = NodeBuilder::<Slave, V3_6>::new()
 ///     .with_local_ip([127, 0, 0, 1].into())
-///     .spawn()
-///     .await?;
+///     .spawn()?;
 /// # Ok(()) }
 /// ```
 pub struct NodeBuilder<R: Role, V: SpecVersion> {
@@ -59,11 +58,13 @@ impl<R: Role, V: SpecVersion> NodeBuilder<R, V> {
     /// Override the local interface IP all four sockets bind to.
     pub fn with_local_ip(mut self, ip: Ipv4Addr) -> Self {
         self.local_ip = ip;
+        self.config.address.set_ip(ip);
         self
     }
 
     /// Override the full [`ApplicationConfig`] in one go.  Any role
-    /// mismatch is corrected — the builder always emits at `R::NODE_TYPE`.
+    /// mismatch is corrected — the builder always emits at
+    /// `R::NODE_TYPE`.
     pub fn with_config(mut self, mut config: ApplicationConfig) -> Self {
         config.node_type = R::NODE_TYPE;
         self.config = config;
@@ -76,8 +77,7 @@ impl<R: Role, V: SpecVersion> NodeBuilder<R, V> {
         self
     }
 
-    /// Read back the configured local IP — useful for tests that
-    /// want to assert the builder accepted their override.
+    /// Read back the configured local IP.
     pub fn local_ip(&self) -> Ipv4Addr {
         self.local_ip
     }
@@ -89,21 +89,30 @@ impl<R: Role, V: SpecVersion> NodeBuilder<R, V> {
 
     /// Spawn the node and return its typed handle.
     ///
-    /// Today this only spawns the [`SessionTask`](crate::session); the
-    /// transport + domain writer + RT-thread wiring lands in a
-    /// follow-up commit on the same release line.  Until then,
-    /// `spawn` is a no-network sentinel — the returned `Node` answers
-    /// `snapshot()` from an empty session.
-    pub async fn spawn(self) -> Result<Node<R, V>, NodeError> {
-        let session = SessionTask::spawn();
-        Ok(from_session(session))
+    /// This is sync (not `async`): the internal engine
+    /// ([`TCNetClient`]) spawns its own tokio runtime, so the caller
+    /// doesn't need one.  If you already have a tokio runtime running,
+    /// `spawn` is safe to call from inside it — the engine's runtime
+    /// is independent.
+    ///
+    /// For `R = Master`, the builder also calls `create_active_node`
+    /// so the returned handle has the full broadcast surface via
+    /// `Deref<Target = ActiveDJNode>`.
+    pub fn spawn(self) -> Result<Node<R, V>, NodeError> {
+        let client = TCNetClient::new(self.config);
+        let active = if TypeId::of::<R>() == TypeId::of::<Master>() {
+            Some(client.create_active_node())
+        } else {
+            None
+        };
+        Ok(from_engine(client, active))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::roles::{Master, Slave};
+    use super::*;
     use crate::V3_6;
     use crate::protocol::NodeType;
 
@@ -125,20 +134,9 @@ mod tests {
     }
 
     #[test]
-    fn with_local_ip_records_value() {
+    fn with_local_ip_propagates_into_config_address() {
         let b = NodeBuilder::<Slave, V3_6>::new().with_local_ip(Ipv4Addr::new(10, 0, 0, 1));
         assert_eq!(b.local_ip(), Ipv4Addr::new(10, 0, 0, 1));
-    }
-
-    #[tokio::test]
-    async fn spawn_returns_typed_node() {
-        let n = NodeBuilder::<Slave, V3_6>::new()
-            .with_node_id(42)
-            .spawn()
-            .await
-            .expect("spawn");
-        let snap = n.snapshot();
-        assert_eq!(snap.peers.len(), 0);
-        n.leave().await.expect("leave");
+        assert_eq!(*b.config().address.ip(), Ipv4Addr::new(10, 0, 0, 1));
     }
 }

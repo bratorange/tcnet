@@ -181,6 +181,7 @@ pub mod transport;
 pub mod view;
 
 pub use active_node::{ActiveDJNode, HotCue, TrackMeta};
+pub use api::{Node, NodeBuilder, NodeError, NodeSnapshot, PeerInfo};
 pub use node::ApplicationConfig;
 pub use node::dj_controller::{
     ChannelSnapshot, DjControllerState, LayerSnapshot, MixerSnapshot, TimeoutError,
@@ -324,6 +325,18 @@ impl TCNetClient {
         // Wait-free load of the most recent published snapshot.
         self.cached_nodes = self.nodes_snapshot.load_full();
         self.cached_nodes.as_slice()
+    }
+
+    /// Lock-free read of the foreign-node list — does not refresh
+    /// the internal cache and does not require `&mut self`.  Cheaper
+    /// when you don't need a stable borrow.
+    pub fn nodes_snapshot_arc(&self) -> std::sync::Arc<Vec<ForeignNodeInfo>> {
+        self.nodes_snapshot.load_full()
+    }
+
+    /// The [`ApplicationConfig`] this client was constructed with.
+    pub fn node_config(&self) -> ApplicationConfig {
+        self.dispatcher.node_config
     }
 
     /// Attach a reader to the foreign DJ controller node at `addr`.

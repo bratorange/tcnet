@@ -24,5 +24,5 @@ pub mod node;
 pub mod roles;
 
 pub use builder::NodeBuilder;
-pub use node::{Node, NodeError};
+pub use node::{Node, NodeError, NodeSnapshot, PeerInfo};
 pub use roles::{Auto, Master, Repeater, Role, Slave};
