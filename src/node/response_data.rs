@@ -1,34 +1,51 @@
 use crate::node::tcnet_packet::Data;
-use std::sync::Mutex;
+use arc_swap::ArcSwap;
+use std::sync::Arc;
 
 /// Per-layer pre-built response packets and live state snapshots.
-#[derive(Default)]
+///
+/// Each field is independently swappable through `ArcSwap`, so the
+/// hot path (Request handler in the dispatcher, periodic update tasks
+/// in the active node) never touches a mutex.
 pub(crate) struct LayerResponseData {
-    pub small_waveform_packet: Option<Data>,
-    pub big_waveform_packets: Vec<Data>,
-    pub beat_grid_packets: Vec<Data>,
-    pub cue_packet: Option<Data>,
-    pub artwork_packets: Vec<Data>,
+    pub small_waveform_packet: ArcSwap<Option<Data>>,
+    pub big_waveform_packets: ArcSwap<Vec<Data>>,
+    pub beat_grid_packets: ArcSwap<Vec<Data>>,
+    pub cue_packet: ArcSwap<Option<Data>>,
+    pub artwork_packets: ArcSwap<Vec<Data>>,
     /// Last-sent MetricsData — returned verbatim on MetricsData requests.
-    pub last_metrics: Option<Data>,
+    pub last_metrics: ArcSwap<Option<Data>>,
     /// Last-sent MetaData — returned verbatim on MetaData requests.
-    pub last_meta: Option<Data>,
+    pub last_meta: ArcSwap<Option<Data>>,
 }
 
-pub(crate) struct ResponseDataStore {
-    pub layers: Vec<LayerResponseData>,
-    pub last_mixer: Option<Data>,
-}
-
-impl Default for ResponseDataStore {
+impl Default for LayerResponseData {
     fn default() -> Self {
-        let layers = (0..8).map(|_| LayerResponseData::default()).collect();
         Self {
-            layers,
-            last_mixer: None,
+            small_waveform_packet: ArcSwap::from_pointee(None),
+            big_waveform_packets: ArcSwap::from_pointee(Vec::new()),
+            beat_grid_packets: ArcSwap::from_pointee(Vec::new()),
+            cue_packet: ArcSwap::from_pointee(None),
+            artwork_packets: ArcSwap::from_pointee(Vec::new()),
+            last_metrics: ArcSwap::from_pointee(None),
+            last_meta: ArcSwap::from_pointee(None),
         }
     }
 }
 
-/// Shared, Mutex-wrapped store passed between ActiveDJNode and Dispatcher.
-pub(crate) type SharedResponseData = std::sync::Arc<Mutex<ResponseDataStore>>;
+pub(crate) struct ResponseDataStore {
+    pub layers: [LayerResponseData; 8],
+    pub last_mixer: ArcSwap<Option<Data>>,
+}
+
+impl Default for ResponseDataStore {
+    fn default() -> Self {
+        Self {
+            layers: std::array::from_fn(|_| LayerResponseData::default()),
+            last_mixer: ArcSwap::from_pointee(None),
+        }
+    }
+}
+
+/// Shared lock-free response store passed between ActiveDJNode and Dispatcher.
+pub(crate) type SharedResponseData = Arc<ResponseDataStore>;

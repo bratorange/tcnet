@@ -447,9 +447,9 @@ impl ActiveDJNode {
                         for &id in LayerId::ALL.iter() {
                             if inner.layer(id).track_id != 0 {
                                 let meta = inner.build_meta_packet(id);
-                                if let Ok(mut rd) = rd_bg.lock() {
-                                    rd.layers[id.index()].last_meta = Some(meta.clone());
-                                }
+                                rd_bg.layers[id.index()]
+                                    .last_meta
+                                    .store(std::sync::Arc::new(Some(meta.clone())));
                                 let _ = sucast.try_send(meta);
                             }
                         }
@@ -471,9 +471,9 @@ impl ActiveDJNode {
                         for &id in LayerId::ALL.iter() {
                             if inner.layer(id).track_id != 0 {
                                 let data = inner.build_metrics_packet(id);
-                                if let Ok(mut rd) = rd_bg.lock() {
-                                    rd.layers[id.index()].last_metrics = Some(data.clone());
-                                }
+                                rd_bg.layers[id.index()]
+                                    .last_metrics
+                                    .store(std::sync::Arc::new(Some(data.clone())));
                                 let _ = sucast.try_send(data);
                             }
                         }
@@ -501,25 +501,25 @@ impl ActiveDJNode {
 
     fn update_metrics(&self, layer: LayerId) -> Result<(), SendError> {
         let data = self.inner.lock().unwrap().build_metrics_packet(layer);
-        if let Ok(mut rd) = self.response_data.lock() {
-            rd.layers[layer.index()].last_metrics = Some(data.clone());
-        }
+        self.response_data.layers[layer.index()]
+            .last_metrics
+            .store(std::sync::Arc::new(Some(data.clone())));
         self.send_slave_unicast(data)
     }
 
     fn update_meta(&self, layer: LayerId) -> Result<(), SendError> {
         let data = self.inner.lock().unwrap().build_meta_packet(layer);
-        if let Ok(mut rd) = self.response_data.lock() {
-            rd.layers[layer.index()].last_meta = Some(data.clone());
-        }
+        self.response_data.layers[layer.index()]
+            .last_meta
+            .store(std::sync::Arc::new(Some(data.clone())));
         self.send_slave_unicast(data)
     }
 
     fn update_mixer(&self) -> Result<(), SendError> {
         let data = self.inner.lock().unwrap().build_mixer_packet();
-        if let Ok(mut rd) = self.response_data.lock() {
-            rd.last_mixer = Some(data.clone());
-        }
+        self.response_data
+            .last_mixer
+            .store(std::sync::Arc::new(Some(data.clone())));
         self.send_slave_unicast(data)
     }
 
@@ -609,8 +609,9 @@ impl ActiveDJNode {
         }
 
         // Pre-build response packets so the dispatcher can answer REQUEST packets.
-        if let Ok(mut rd) = self.response_data.lock() {
-            let ld = &mut rd.layers[layer.index()];
+        // Each field is its own ArcSwap — wait-free atomic stores, no locks.
+        {
+            let ld = &self.response_data.layers[layer.index()];
             let lid = layer.as_packet_id();
 
             // SmallWaveform: 2400 bytes, uniform amplitude 0x40 (blue).
@@ -619,15 +620,14 @@ impl ActiveDJNode {
                 chunk[0] = 0x40; // amplitude
                 chunk[1] = 0x03; // blue color
             }
-            ld.small_waveform_packet = Some(Data::SmallWaveform(SmallWaveformData::new(
-                lid,
-                waveform_bytes,
+            ld.small_waveform_packet.store(std::sync::Arc::new(Some(
+                Data::SmallWaveform(SmallWaveformData::new(lid, waveform_bytes)),
             )));
 
             // BigWaveform: same bytes, split into 4400-byte clusters.
             let big_raw = waveform_bytes.to_vec();
             let total = big_raw.len() as u32;
-            ld.big_waveform_packets = big_raw
+            let big_packets: Vec<Data> = big_raw
                 .chunks(4400)
                 .enumerate()
                 .map(|(i, chunk)| {
@@ -641,9 +641,11 @@ impl ActiveDJNode {
                     ))
                 })
                 .collect();
+            ld.big_waveform_packets
+                .store(std::sync::Arc::new(big_packets));
 
             // BeatGrid: compute entries from BPM and duration.
-            {
+            let beat_grid_packets: Vec<Data> = {
                 use deku::DekuContainerWrite;
                 let beat_interval_ms = 60_000.0 / info.bpm;
                 let mut entries: Vec<BeatGridEntry> = Vec::new();
@@ -663,7 +665,7 @@ impl ActiveDJNode {
                     .collect();
                 let total_bg = raw.len() as u32;
                 let n = raw.chunks(2400).count().max(1) as u32;
-                ld.beat_grid_packets = if raw.is_empty() {
+                if raw.is_empty() {
                     vec![Data::BeatGrid(BeatGridHeader::new_packet(
                         lid,
                         0,
@@ -684,25 +686,21 @@ impl ActiveDJNode {
                             ))
                         })
                         .collect()
-                };
-            }
+                }
+            };
+            ld.beat_grid_packets
+                .store(std::sync::Arc::new(beat_grid_packets));
 
             // Cue: clear all hot cues + the [CUE] memory marker on track load.
-            ld.cue_packet = Some(Data::Cue(CueData::build(
-                lid,
-                [CueEntry::EMPTY; 18],
-                0,
-                0,
-            )));
+            ld.cue_packet.store(std::sync::Arc::new(Some(Data::Cue(
+                CueData::build(lid, [CueEntry::EMPTY; 18], 0, 0),
+            ))));
 
             // Artwork: empty placeholder.
-            ld.artwork_packets = vec![Data::ArtworkFile(ArtworkFileData::new_packet(
-                lid,
-                0,
-                1,
-                0,
-                vec![],
-            ))];
+            ld.artwork_packets
+                .store(std::sync::Arc::new(vec![Data::ArtworkFile(
+                    ArtworkFileData::new_packet(lid, 0, 1, 0, vec![]),
+                )]));
         }
 
         // Populate last_metrics so stopped tracks can respond to MetricsData requests.
@@ -791,9 +789,9 @@ impl ActiveDJNode {
     fn rebuild_cue_packet(&self, layer: LayerId) {
         let lid = layer.as_packet_id();
         let cue_data = self.inner.lock().unwrap().cue_states[layer.index()].to_cue_data(lid);
-        if let Ok(mut rd) = self.response_data.lock() {
-            rd.layers[layer.index()].cue_packet = Some(Data::Cue(cue_data));
-        }
+        self.response_data.layers[layer.index()]
+            .cue_packet
+            .store(std::sync::Arc::new(Some(Data::Cue(cue_data))));
     }
 
     /// Set the persistent [CUE] memory marker for `layer`. Peers that issue a
@@ -926,33 +924,33 @@ impl ActiveDJNode {
             .collect();
         let total = serialized.len() as u32;
 
-        if let Ok(mut rd) = self.response_data.lock() {
-            let ld = &mut rd.layers[layer.index()];
-            ld.beat_grid_packets = if serialized.is_empty() {
-                vec![Data::BeatGrid(BeatGridHeader::new_packet(
-                    lid,
-                    0,
-                    1,
-                    0,
-                    vec![],
-                ))]
-            } else {
-                let n_packets = (serialized.len()).div_ceil(2400).max(1) as u32;
-                serialized
-                    .chunks(2400)
-                    .enumerate()
-                    .map(|(i, chunk)| {
-                        Data::BeatGrid(BeatGridHeader::new_packet(
-                            lid,
-                            total,
-                            n_packets,
-                            i as u32,
-                            chunk.to_vec(),
-                        ))
-                    })
-                    .collect()
-            };
-        }
+        let beat_grid_packets: Vec<Data> = if serialized.is_empty() {
+            vec![Data::BeatGrid(BeatGridHeader::new_packet(
+                lid,
+                0,
+                1,
+                0,
+                vec![],
+            ))]
+        } else {
+            let n_packets = (serialized.len()).div_ceil(2400).max(1) as u32;
+            serialized
+                .chunks(2400)
+                .enumerate()
+                .map(|(i, chunk)| {
+                    Data::BeatGrid(BeatGridHeader::new_packet(
+                        lid,
+                        total,
+                        n_packets,
+                        i as u32,
+                        chunk.to_vec(),
+                    ))
+                })
+                .collect()
+        };
+        self.response_data.layers[layer.index()]
+            .beat_grid_packets
+            .store(std::sync::Arc::new(beat_grid_packets));
     }
 
     /// Overwrite the cached small + big waveform responses for `layer`.
@@ -967,32 +965,34 @@ impl ActiveDJNode {
     /// [`LargeWaveformData`](crate::RequestDataType::LargeWaveformData)
     /// requests see the new bytes.
     pub fn set_response_waveforms(&self, layer: LayerId, small: [u8; 2400], big: Vec<u8>) {
-        if let Ok(mut rd) = self.response_data.lock() {
-            let ld = &mut rd.layers[layer.index()];
-            let lid = layer.as_packet_id();
-            ld.small_waveform_packet =
-                Some(Data::SmallWaveform(SmallWaveformData::new(lid, small)));
+        let ld = &self.response_data.layers[layer.index()];
+        let lid = layer.as_packet_id();
+        ld.small_waveform_packet
+            .store(std::sync::Arc::new(Some(Data::SmallWaveform(
+                SmallWaveformData::new(lid, small),
+            ))));
 
-            let total = big.len() as u32;
-            // Split big into 4400-byte clusters (matches the existing placeholder convention).
-            ld.big_waveform_packets = if big.is_empty() {
-                vec![]
-            } else {
-                let n_packets = (total as usize).div_ceil(4400).max(1) as u32;
-                big.chunks(4400)
-                    .enumerate()
-                    .map(|(i, chunk)| {
-                        Data::BigWaveform(BigWaveformData::new_packet(
-                            lid,
-                            total,
-                            n_packets,
-                            i as u32,
-                            chunk.to_vec(),
-                        ))
-                    })
-                    .collect()
-            };
-        }
+        let total = big.len() as u32;
+        // Split big into 4400-byte clusters (matches the existing placeholder convention).
+        let big_packets: Vec<Data> = if big.is_empty() {
+            Vec::new()
+        } else {
+            let n_packets = (total as usize).div_ceil(4400).max(1) as u32;
+            big.chunks(4400)
+                .enumerate()
+                .map(|(i, chunk)| {
+                    Data::BigWaveform(BigWaveformData::new_packet(
+                        lid,
+                        total,
+                        n_packets,
+                        i as u32,
+                        chunk.to_vec(),
+                    ))
+                })
+                .collect()
+        };
+        ld.big_waveform_packets
+            .store(std::sync::Arc::new(big_packets));
     }
 
     // --- state read access ---

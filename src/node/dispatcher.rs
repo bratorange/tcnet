@@ -213,9 +213,11 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
                                         })
                                         .map(|n| n.address)
                                         .unwrap_or(SocketAddrV4::new(src_ip, 65_023));
-                                    let rd = dispatcher.response_data.lock().unwrap();
-                                    let packets =
-                                        build_request_response(req.data_type, req.layer, &rd);
+                                    let packets = build_request_response(
+                                        req.data_type,
+                                        req.layer,
+                                        &dispatcher.response_data,
+                                    );
                                     (dest, packets)
                                 };
                                 if packets.is_empty() {
@@ -326,7 +328,8 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
     }
 }
 
-/// Builds the response packets for a REQUEST packet.
+/// Builds the response packets for a REQUEST packet by snapshotting the
+/// relevant `ArcSwap` fields. Wait-free for the dispatcher.
 fn build_request_response(
     data_type: RequestDataType,
     layer: LayerId,
@@ -335,17 +338,23 @@ fn build_request_response(
     let idx = layer.index();
     let ld = &rd.layers[idx];
 
-    match data_type {
-        RequestDataType::MetricsData => ld.last_metrics.clone().into_iter().collect(),
-        RequestDataType::MetaData => ld.last_meta.clone().into_iter().collect(),
-        RequestDataType::BeatGridData => ld.beat_grid_packets.clone(),
-        RequestDataType::CueData => ld.cue_packet.clone().into_iter().collect(),
-        RequestDataType::SmallWaveformData => {
-            ld.small_waveform_packet.clone().into_iter().collect()
+    // Helper: snapshot an `ArcSwap<Option<Data>>` into a one-element Vec or empty.
+    fn opt_to_vec(arc: arc_swap::Guard<Arc<Option<Data>>>) -> Vec<Data> {
+        match (**arc).as_ref() {
+            Some(d) => vec![d.clone()],
+            None => Vec::new(),
         }
-        RequestDataType::LargeWaveformData => ld.big_waveform_packets.clone(),
-        RequestDataType::LowResArtworkFile => ld.artwork_packets.clone(),
-        RequestDataType::MixerData => rd.last_mixer.clone().into_iter().collect(),
+    }
+
+    match data_type {
+        RequestDataType::MetricsData => opt_to_vec(ld.last_metrics.load()),
+        RequestDataType::MetaData => opt_to_vec(ld.last_meta.load()),
+        RequestDataType::BeatGridData => (**ld.beat_grid_packets.load()).clone(),
+        RequestDataType::CueData => opt_to_vec(ld.cue_packet.load()),
+        RequestDataType::SmallWaveformData => opt_to_vec(ld.small_waveform_packet.load()),
+        RequestDataType::LargeWaveformData => (**ld.big_waveform_packets.load()).clone(),
+        RequestDataType::LowResArtworkFile => (**ld.artwork_packets.load()).clone(),
+        RequestDataType::MixerData => opt_to_vec(rd.last_mixer.load()),
     }
 }
 

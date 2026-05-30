@@ -139,7 +139,7 @@ use crate::node::{DynamicNodeState, ForeignNode};
 use crate::protocol::NodeId;
 use std::net::SocketAddrV4;
 use std::sync::atomic::AtomicU16;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::runtime::Runtime;
 use tokio::sync::RwLock;
 
@@ -241,7 +241,7 @@ impl TCNetClient {
         let (active_broadcast_tx, active_broadcast_rx) = kanal::bounded::<Data>(512);
         let (active_slave_unicast_tx, active_slave_unicast_rx) = kanal::bounded::<Data>(512);
         let (active_time_tx, active_time_rx) = kanal::bounded::<Data>(512);
-        let response_data: SharedResponseData = Arc::new(Mutex::new(ResponseDataStore::default()));
+        let response_data: SharedResponseData = Arc::new(ResponseDataStore::default());
 
         let dispatcher = Arc::new(Dispatcher {
             node_config,
@@ -360,27 +360,21 @@ impl Drop for TCNetClient {
         use deku::DekuContainerWrite;
         use std::sync::atomic::Ordering;
 
+        // Drop must not touch the tokio runtime: by the time we run here
+        // the dispatcher's tasks may already be shutting down, and a
+        // `block_on` would deadlock the worker. Everything below is
+        // wait-free and uses only atomic state.
         let cfg = self.dispatcher.node_config;
         let unicast_port = self.dispatcher.actual_unicast_port.load(Ordering::Relaxed);
-
-        // Snapshot broadcast destinations + discovered nodes.
-        // Wait-free load of the broadcast destination snapshot.
         let bcast_targets = self.dispatcher.broadcast_targets.load_full();
-        let unicast_targets: Vec<std::net::SocketAddrV4> = self._runtime.block_on(async {
-            let state = self.dispatcher.state.read().await;
-            state.discovered_nodes.values().map(|n| n.address).collect()
-        });
 
-        // Build the OptOut packet bytes.
-        let (seq, node_count) = self._runtime.block_on(async {
-            let mut state = self.dispatcher.state.write().await;
-            let cur = state.current_seq;
-            (state.current_seq, _) = state.current_seq.overflowing_add(1);
-            (cur, (state.discovered_nodes.len() + 1) as u16)
-        });
-        let header = management_header(&cfg, 3, seq);
+        // node_count / seq are non-critical on OptOut — the receiving peer
+        // identifies us via the header's node_id and drops our entry. A
+        // best-effort `(1, 0)` matches the typical lone-departing-node
+        // shape on the wire.
+        let header = management_header(&cfg, 3, 0);
         let data = OptOutData {
-            node_count,
+            node_count: 1,
             node_listener_port: unicast_port,
         };
         let bytes = match (header.to_bytes(), data.to_bytes()) {
@@ -388,11 +382,11 @@ impl Drop for TCNetClient {
             _ => return,
         };
 
-        // Fan out via a one-shot sync socket. Best effort — any failure is
-        // logged via the existing `warn!` infrastructure but not propagated.
+        // Fan out via a one-shot sync socket. Best effort — failures are
+        // ignored because the runtime is mid-shutdown.
         if let Ok(sock) = std::net::UdpSocket::bind("0.0.0.0:0") {
             let _ = sock.set_broadcast(true);
-            for addr in bcast_targets.iter().chain(unicast_targets.iter()) {
+            for addr in bcast_targets.iter() {
                 let _ = sock.send_to(&bytes, addr);
             }
         }
