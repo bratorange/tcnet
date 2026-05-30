@@ -18,11 +18,11 @@ pub(crate) struct ForeignNode {
     pub dj_controller: Option<DjController>,
 }
 
+/// Shared map of discovered peers. `current_seq` and `uptime` live
+/// outside this struct as standalone atomics (see [`Dispatcher`]).
 #[derive(Default)]
 pub(crate) struct DynamicNodeState {
     pub discovered_nodes: HashMap<SocketAddrV4, ForeignNode>,
-    pub uptime: u16,
-    pub current_seq: u8,
 }
 
 /// Identity and bind configuration used by a [`TCNetClient`](crate::TCNetClient)

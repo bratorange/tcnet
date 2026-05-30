@@ -1,7 +1,7 @@
 use crate::into_ascii;
 use crate::node::dispatcher::timestamp_micros;
 use crate::node::tcnet_packet::Data::*;
-use crate::node::{ApplicationConfig, DynamicNodeState};
+use crate::node::ApplicationConfig;
 use crate::protocol::*;
 use deku::prelude::Writer;
 use deku::{DekuContainerRead, DekuContainerWrite, DekuError, DekuWrite, DekuWriter};
@@ -222,14 +222,28 @@ pub(crate) fn management_header(
 
 pub(crate) fn opt_in_packet(
     app_config: &ApplicationConfig,
-    node_state: &DynamicNodeState,
+    dispatcher: &crate::node::dispatcher::Dispatcher,
     seq: u8,
 ) -> Result<Vec<u8>, DekuError> {
+    use std::sync::atomic::Ordering;
     let header = management_header(app_config, 2, seq);
+    // Snapshot the discovered-nodes count from the existing RwLock once
+    // (the count is stable across an opt-in burst). Uptime comes from
+    // the standalone atomic.
+    let node_count = {
+        // The dispatcher's `state` is locked at the call site; we read
+        // its snapshot length without taking a fresh lock here.
+        // Caller already holds the read guard.
+        dispatcher
+            .nodes_snapshot
+            .load()
+            .len()
+            .saturating_add(1) as u16
+    };
     let data = OptInData {
-        node_count: (node_state.discovered_nodes.len() + 1) as u16,
+        node_count,
         node_listener_port: app_config.address.port(),
-        uptime: node_state.uptime,
+        uptime: dispatcher.uptime.load(Ordering::Relaxed),
         _reserved0: Default::default(),
         vendor_name: app_config.vendor_name,
         application: app_config.application_name,

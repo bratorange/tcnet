@@ -15,7 +15,7 @@ use std::collections::HashSet;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use arc_swap::ArcSwap;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU16, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::UdpSocket;
@@ -28,6 +28,16 @@ pub struct Dispatcher {
     pub(crate) bind_address: SocketAddrV4,
     /// Actual unicast port bound at runtime; may differ from bind_address.port() when falling back.
     pub(crate) actual_unicast_port: AtomicU16,
+    /// Monotonic SEQ counter for every outgoing packet (single shared
+    /// source — see ARCHITECTURE.md §5.2). Wraps at u8 boundary by design.
+    pub(crate) current_seq: AtomicU8,
+    /// Node uptime in seconds, rolling over at 12 h (43_200) per spec
+    /// page 4. Owned by `timeout_foreign_nodes` (1 Hz tick), read by
+    /// `opt_in_packet`.
+    pub(crate) uptime: AtomicU16,
+    /// Discovered foreign peers. Reads & writes still serialise through a
+    /// tokio RwLock; lifting this to a single-actor session task is the
+    /// next architectural step (ARCHITECTURE.md §5.1).
     pub(crate) state: Arc<RwLock<DynamicNodeState>>,
     pub(crate) outgoing_tx: kanal::Sender<OutgoingRequest>,
     pub(crate) outgoing_rx: kanal::Receiver<OutgoingRequest>,
@@ -368,19 +378,14 @@ async fn send(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) {
         for msg in msgs {
             let target = msg.destination;
             let (msg_type_id, _) = msg.data.message_type_id();
-            let serde_result = {
-                let mut state = dispatcher.state.write().await;
-                let seq = state.current_seq;
-                let header = management_header(&dispatcher.node_config, msg_type_id, seq);
-                let packet = Packet {
-                    header,
-                    data: msg.data,
-                };
-                trace!("Sending packet to {}: {:?}", target, packet);
-                let bytes = packet.to_bytes();
-                (state.current_seq, _) = state.current_seq.overflowing_add(1);
-                bytes
+            let seq = next_seq(&dispatcher);
+            let header = management_header(&dispatcher.node_config, msg_type_id, seq);
+            let packet = Packet {
+                header,
+                data: msg.data,
             };
+            trace!("Sending packet to {}: {:?}", target, packet);
+            let serde_result = packet.to_bytes();
             match serde_result {
                 Ok(bytes) => {
                     if let Err(e) = socket.send_to(&bytes, target).await {
@@ -427,7 +432,7 @@ async fn broadcast(dispatcher: Arc<Dispatcher>, broadcast_socket: Arc<UdpSocket>
         tick.tick().await;
 
         let packets = {
-            let mut dispatcher_state = dispatcher.state.write().await;
+            let dispatcher_state = dispatcher.state.read().await;
             let mut config = dispatcher.node_config;
             config
                 .address
@@ -442,21 +447,18 @@ async fn broadcast(dispatcher: Arc<Dispatcher>, broadcast_socket: Arc<UdpSocket>
             let mut packets: Vec<(SocketAddrV4, Vec<u8>)> = unicast_targets
                 .iter()
                 .map(|addr| {
-                    let seq = dispatcher_state.current_seq;
-                    let pkt = opt_in_packet(&config, &dispatcher_state, seq)
+                    let seq = next_seq(&dispatcher);
+                    let pkt = opt_in_packet(&config, &dispatcher, seq)
                         .expect("TCNet: Could not serialize opt in packet");
-                    (dispatcher_state.current_seq, _) =
-                        dispatcher_state.current_seq.overflowing_add(1);
                     (*addr, pkt)
                 })
                 .collect();
 
             // Also broadcast.
             for bcast_addr in &ipv4_addrs {
-                let seq = dispatcher_state.current_seq;
-                let pkt = opt_in_packet(&config, &dispatcher_state, seq)
+                let seq = next_seq(&dispatcher);
+                let pkt = opt_in_packet(&config, &dispatcher, seq)
                     .expect("TCNet: Could not serialize opt in packet");
-                (dispatcher_state.current_seq, _) = dispatcher_state.current_seq.overflowing_add(1);
                 packets.push((*bcast_addr, pkt));
             }
 
@@ -482,7 +484,8 @@ async fn timeout_foreign_nodes(node: Arc<Dispatcher>) {
             // Spec V3.5.1B page 4: OptIn `uptime` is seconds-since-start and
             // must roll over every 12 h (= 43_200 s). One increment per
             // second matches the 1 Hz tick we are already on.
-            state.uptime = (state.uptime + 1) % 43_200;
+            let new_uptime = (node.uptime.load(Ordering::Relaxed) + 1) % 43_200;
+            node.uptime.store(new_uptime, Ordering::Relaxed);
             state.discovered_nodes.retain(|_, foreign_node| {
                 let keep = foreign_node.last_seen + 10 > secs;
                 if !keep {
@@ -549,7 +552,7 @@ async fn active_broadcast(
                 s.node_count = node_count;
             }
             let (msg_type_id, _) = data.message_type_id();
-            let seq = next_seq(&dispatcher).await;
+            let seq = next_seq(&dispatcher);
             let header = management_header(&dispatcher.node_config, msg_type_id, seq);
             let packet = Packet { header, data };
             if let Ok(bytes) = packet.to_bytes() {
@@ -570,7 +573,7 @@ async fn active_broadcast(
         if !slave_msgs.is_empty() {
             for data in slave_msgs {
                 let (msg_type_id, _) = data.message_type_id();
-                let seq = next_seq(&dispatcher).await;
+                let seq = next_seq(&dispatcher);
                 let header = management_header(&dispatcher.node_config, msg_type_id, seq);
                 let packet = Packet { header, data };
                 if let Ok(bytes) = packet.to_bytes() {
@@ -588,7 +591,7 @@ async fn active_broadcast(
         let _ = dispatcher.active_time_rx.drain_into(&mut time_msgs);
         for data in time_msgs {
             let (msg_type_id, _) = data.message_type_id();
-            let seq = next_seq(&dispatcher).await;
+            let seq = next_seq(&dispatcher);
             let header = management_header(&dispatcher.node_config, msg_type_id, seq);
             let packet = Packet { header, data };
             if let Ok(bytes) = packet.to_bytes() {
@@ -606,17 +609,12 @@ async fn active_broadcast(
     }
 }
 
-/// Pull the next sequence number from the shared dispatcher state and bump
-/// it (wrapping at 256). Replaces the formerly-local counter inside
-/// `active_broadcast()` that ran independently of the one
-/// `send()`/`broadcast()` already share via `state.current_seq` — so SEQ
-/// bytes on the wire now form a single monotonically-increasing stream
-/// instead of two interleaved ones.
-async fn next_seq(dispatcher: &Dispatcher) -> u8 {
-    let mut state = dispatcher.state.write().await;
-    let cur = state.current_seq;
-    (state.current_seq, _) = state.current_seq.overflowing_add(1);
-    cur
+/// Pull the next sequence number from the shared atomic counter and bump
+/// it (wrapping at the u8 boundary). All outgoing packets — broadcasts,
+/// unicasts, request responses — draw from this single source so that
+/// the SEQ byte on the wire forms one monotonically-increasing stream.
+fn next_seq(dispatcher: &Dispatcher) -> u8 {
+    dispatcher.current_seq.fetch_add(1, Ordering::Relaxed)
 }
 
 pub fn timestamp_micros() -> u32 {

@@ -247,6 +247,8 @@ impl TCNetClient {
             node_config,
             bind_address: node_config.address,
             actual_unicast_port: AtomicU16::new(node_config.address.port()),
+            current_seq: std::sync::atomic::AtomicU8::new(0),
+            uptime: AtomicU16::new(0),
             state: Arc::new(RwLock::new(DynamicNodeState::default())),
             outgoing_tx,
             outgoing_rx,
