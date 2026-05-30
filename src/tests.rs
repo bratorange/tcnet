@@ -878,3 +878,632 @@ fn test_metrics_broadcast_for_stopped_layer() {
     );
     assert_eq!(m.track_id, STOPPED_TRACK_ID, "track_id must match the loaded track");
 }
+
+// ---------------------------------------------------------------------------
+// Spec-compliance and reliability regression tests
+//
+// One test per behaviour pinned down during a TCNet V3.5.1B audit. Each
+// guards against a class of bug (panic on unknown wire byte, missing
+// reassembly, missing emission, off-by-N wire size, …) — they are meant
+// to stay in the suite indefinitely, not just until their original
+// failure is fixed.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_nodeoptions_unknown_bits_does_not_panic() {
+    // bitflags::from_bits returns None for any bit outside the four defined
+    // flags (NEED_AUTHENTICATION | SUPPORTS_TCNCM | SUPPORTS_TCNASDP | DND
+    // = 0xF). The current NodeOptions reader unwraps that, panicking the
+    // tokio listen task for every packet whose node_options has an unknown
+    // bit (i.e. any future protocol extension).
+    use crate::node::tcnet_packet::Packet;
+
+    let mut bytes = vec![
+        // 24-byte ManagementHeader
+        0x01, 0x00, 0x03, 0x06,                                  // node_id, proto 3.6
+        b'T', b'C', b'N', 0x02,                                  // magic, OptIn
+        b'P', b'i', b'o', b'.', b'X', b'_', b'_', b'_',          // node_name
+        0x00, 0x02,                                              // seq, node_type=Master
+        0x10, 0x00,                                              // node_options=0x0010 ← unknown bit
+        0x00, 0x00, 0x00, 0x00,                                  // timestamp
+    ];
+    assert_eq!(bytes.len(), 24);
+    bytes.extend_from_slice(&[
+        0x01, 0x00,                                              // node_count = 1
+        0xff, 0xfd,                                              // listener_port = 65023
+        0x00, 0x00,                                              // uptime
+        0x00, 0x00,                                              // _reserved0
+        // vendor_name + application_name (32 bytes)
+        b'P', b'i', b'o', b'n', b'e', b'e', b'r', b'_',
+        b'_', b'_', b'_', b'_', b'_', b'_', b'_', b'_',
+        b'r', b'e', b'k', b'o', b'r', b'd', b'b', b'o',
+        b'x', b'_', b'_', b'_', b'_', b'_', b'_', b'_',
+        0x06, 0x00, 0x00,                                        // version 6.0.0
+        0x00,                                                    // _reserved1
+    ]);
+    assert_eq!(bytes.len(), 68);
+
+    let result = std::panic::catch_unwind(|| Packet::deserialize_packet(&bytes));
+    assert!(
+        result.is_ok(),
+        "deserialize_packet panicked on a packet with an unknown NodeOptions bit"
+    );
+}
+
+#[test]
+fn test_send_task_does_not_panic_on_send_failure() {
+    // Structural: dispatcher::send() must not turn a single UDP send_to
+    // error (ENETUNREACH/EMSGSIZE/ECONNREFUSED) into a panic that kills
+    // the whole task and stalls every REQUEST response + outgoing unicast.
+    let src = include_str!("node/dispatcher.rs");
+    assert!(
+        !src.contains(".expect(\"Could not send packet!\")"),
+        "dispatcher::send still panics on UDP send_to failure"
+    );
+}
+
+#[test]
+#[serial]
+fn test_big_waveform_reassembles_multi_packet_response() {
+    use crate::node::tcnet_packet::Packet;
+    use crate::protocol::BigWaveformData;
+
+    let _ = env_logger::try_init();
+
+    let mut node_config = ApplicationConfig::default();
+    node_config.node_type = NodeType::Master;
+    let client = TCNetClient::new(node_config);
+    sleep(Duration::from_millis(400));
+
+    let cdj = UdpSocket::bind("127.0.0.1:0").expect("bind fake CDJ");
+    cdj.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    let cdj_port = cdj.local_addr().unwrap().port();
+    let cfg = ApplicationConfig {
+        node_type: NodeType::Slave,
+        address: SocketAddrV4::new(Ipv4Addr::LOCALHOST, cdj_port),
+        ..fake_config()
+    };
+    let dest: SocketAddr = "127.0.0.1:60000".parse().unwrap();
+
+    // Register the fake CDJ via OptIn + Metrics so the DjController is created.
+    let (h, d) = opt_in_bytes(&cfg, 0);
+    send_packet(&cdj, dest, h, d);
+    let (h, d) = metrics_l1_bytes(&cfg, 1);
+    send_packet(&cdj, dest, h, d);
+    sleep(Duration::from_millis(250));
+
+    // Responder thread: waits for the RequestData packet from the client,
+    // then sends back 3 BigWaveform chunks (100 bytes each = 300 bytes total).
+    let cdj_responder = cdj.try_clone().expect("clone cdj");
+    let responder = std::thread::spawn(move || -> Result<(), String> {
+        let mut buf = [0u8; 8192];
+        loop {
+            let (size, src) = cdj_responder.recv_from(&mut buf).map_err(|e| e.to_string())?;
+            let pkt = match Packet::deserialize_packet(&buf[..size]) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            if !matches!(pkt.data, crate::node::tcnet_packet::Data::Request(_)) {
+                continue;
+            }
+            for i in 0u32..3 {
+                let chunk: Vec<u8> = vec![(i + 1) as u8; 100];
+                let bw = BigWaveformData::new_packet(
+                    LayerId::L1.as_packet_id(),
+                    300, // total data_size
+                    3,   // total_packets
+                    i,   // packet_no
+                    chunk,
+                );
+                let header = management_header(&cfg, 200, (100 + i) as u8);
+                let payload = [
+                    header.to_bytes().map_err(|e| e.to_string())?,
+                    bw.to_bytes().map_err(|e| e.to_string())?,
+                ]
+                .concat();
+                cdj_responder
+                    .send_to(&payload, src)
+                    .map_err(|e| e.to_string())?;
+            }
+            return Ok(());
+        }
+    });
+
+    let view = client
+        .get_any_controller_view()
+        .expect("no DjControllerView — fake CDJ not registered");
+
+    let assembled = client
+        ._runtime
+        .block_on(view.request_big_waveform(LayerId::L1))
+        .expect("request_big_waveform timed out");
+
+    let _ = responder
+        .join()
+        .expect("responder thread panicked")
+        .map_err(|e| panic!("responder errored: {}", e));
+
+    assert_eq!(
+        assembled.bytes().len(),
+        300,
+        "BigWaveform payload is {} bytes (first chunk only), expected 300 (reassembled)",
+        assembled.bytes().len()
+    );
+}
+
+#[test]
+#[serial]
+fn test_artwork_file_reassembles_multi_packet_response() {
+    use crate::node::tcnet_packet::Packet;
+    use crate::protocol::ArtworkFileData;
+
+    let _ = env_logger::try_init();
+
+    let mut node_config = ApplicationConfig::default();
+    node_config.node_type = NodeType::Master;
+    let client = TCNetClient::new(node_config);
+    sleep(Duration::from_millis(400));
+
+    let cdj = UdpSocket::bind("127.0.0.1:0").expect("bind fake CDJ");
+    cdj.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    let cdj_port = cdj.local_addr().unwrap().port();
+    let cfg = ApplicationConfig {
+        node_type: NodeType::Slave,
+        address: SocketAddrV4::new(Ipv4Addr::LOCALHOST, cdj_port),
+        ..fake_config()
+    };
+    let dest: SocketAddr = "127.0.0.1:60000".parse().unwrap();
+
+    let (h, d) = opt_in_bytes(&cfg, 0);
+    send_packet(&cdj, dest, h, d);
+    let (h, d) = metrics_l1_bytes(&cfg, 1);
+    send_packet(&cdj, dest, h, d);
+    sleep(Duration::from_millis(250));
+
+    let cdj_responder = cdj.try_clone().expect("clone cdj");
+    let responder = std::thread::spawn(move || -> Result<(), String> {
+        let mut buf = [0u8; 8192];
+        loop {
+            let (size, src) = cdj_responder.recv_from(&mut buf).map_err(|e| e.to_string())?;
+            let pkt = match Packet::deserialize_packet(&buf[..size]) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            if !matches!(pkt.data, crate::node::tcnet_packet::Data::Request(_)) {
+                continue;
+            }
+            for i in 0u32..3 {
+                let chunk: Vec<u8> = vec![(i + 10) as u8; 100];
+                let af = ArtworkFileData::new_packet(
+                    LayerId::L1.as_packet_id(),
+                    300,
+                    3,
+                    i,
+                    chunk,
+                );
+                let header = management_header(&cfg, 200, (110 + i) as u8);
+                let payload = [
+                    header.to_bytes().map_err(|e| e.to_string())?,
+                    af.to_bytes().map_err(|e| e.to_string())?,
+                ]
+                .concat();
+                cdj_responder
+                    .send_to(&payload, src)
+                    .map_err(|e| e.to_string())?;
+            }
+            return Ok(());
+        }
+    });
+
+    let view = client
+        .get_any_controller_view()
+        .expect("no DjControllerView — fake CDJ not registered");
+
+    let assembled = client
+        ._runtime
+        .block_on(view.request_artwork_file(LayerId::L1))
+        .expect("request_artwork_file timed out");
+
+    let _ = responder
+        .join()
+        .expect("responder thread panicked")
+        .map_err(|e| panic!("responder errored: {}", e));
+
+    // ArtworkFileData::file_data is a private field; compute the payload
+    // length via the deku round-trip (18-byte header + N-byte payload).
+    let wire = assembled.to_bytes().unwrap();
+    let payload_len = wire.len().saturating_sub(18);
+    assert_eq!(
+        payload_len, 300,
+        "ArtworkFile payload is {} bytes (first chunk only), expected 300 (reassembled)",
+        payload_len
+    );
+}
+
+#[test]
+#[serial]
+fn test_uptime_increments_in_optin() {
+    use crate::node::tcnet_packet::{Data, Packet};
+
+    let _ = env_logger::try_init();
+
+    // Pre-bind 60000 (forces the dispatcher onto its loopback-broadcast fix
+    // path so our listener sees the OptIns).
+    let listener = UdpSocket::bind("127.0.0.1:60000").expect("bind 60000");
+    listener.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+
+    let _client = TCNetClient::new(ApplicationConfig::default());
+
+    // Watch OptIn broadcasts for ~3 s and capture the highest uptime seen.
+    let mut max_uptime: u16 = 0;
+    let mut buf = [0u8; 8192];
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < deadline {
+        if let Ok((size, _)) = listener.recv_from(&mut buf) {
+            if let Ok(pkt) = Packet::deserialize_packet(&buf[..size]) {
+                if let Data::OptIn(oi) = pkt.data {
+                    if oi.uptime > max_uptime {
+                        max_uptime = oi.uptime;
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        max_uptime > 0,
+        "OptIn carried uptime=0 across the entire observation window — counter never advances"
+    );
+}
+
+#[test]
+#[serial]
+fn test_load_track_nan_bpm_does_not_hang() {
+    use crate::active_node::TrackMeta;
+
+    let _ = env_logger::try_init();
+    let client = TCNetClient::new(ApplicationConfig::default());
+    let mut active = client.create_active_node();
+    sleep(Duration::from_millis(300));
+
+    let worker = std::thread::spawn(move || {
+        // Current code: 60000.0 / NaN = NaN; (beat as f32 * NaN) as u32 = 0,
+        // so ts > duration_ms is forever false and the loop never breaks.
+        // In debug builds the loop instead panics on `beat as u16 + 1`
+        // overflow at iteration 65536; in release it spins forever until
+        // the u32 `beat` wraps around. Both are bugs.
+        let _ = active.load_track(
+            LayerId::L1,
+            TrackMeta {
+                title: "x".into(),
+                artist: "y".into(),
+                duration_ms: 60_000,
+                bpm: f32::NAN,
+                track_id: 1,
+            },
+        );
+    });
+
+    let start = std::time::Instant::now();
+    loop {
+        if worker.is_finished() {
+            let join = worker.join();
+            assert!(
+                join.is_ok(),
+                "load_track(bpm=NaN) panicked (likely u16 overflow in synthesised beat-grid)"
+            );
+            return;
+        }
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!("load_track(bpm=NaN) hung");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn test_cuedata_wire_size_matches_spec() {
+    use crate::protocol::CueData;
+
+    // Spec V3.5.1B page 18: CueData total packet size = 456 bytes
+    // (24-byte ManagementHeader + 432-byte data section). Current code
+    // emits 446 bytes (10 short).
+    let data_len = CueData::new(1, 0).to_bytes().unwrap().len();
+    let total = data_len + 24;
+    assert_eq!(
+        total, 456,
+        "CueData on-wire size = {} bytes, spec says 456",
+        total
+    );
+}
+
+#[test]
+fn test_message_type_213_parses_as_appspecific() {
+    use crate::node::tcnet_packet::{Data, Packet};
+
+    // Spec page 2 + page 30: type 213 = "TCNet Application Specific Data"
+    // (broadcast variant). The current dispatcher returns
+    // MessageTypeNotImplemented and silently drops it.
+    let mut bytes = vec![
+        // header
+        0x01, 0x00, 0x03, 0x06,
+        b'T', b'C', b'N', 213,                                   // message_type = 213
+        b'A', b'p', b'p', b'_', b'_', b'_', b'_', b'_',
+        0x00, 0x02,
+        0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+    ];
+    assert_eq!(bytes.len(), 24);
+    // AppSpecificData (18 bytes, data_size=0)
+    bytes.extend_from_slice(&[
+        0x12, 0x34,                                              // ident 1/2
+        0x00, 0x00, 0x00, 0x00,                                  // data_size = 0
+        0x01, 0x00, 0x00, 0x00,                                  // total_packets = 1
+        0x00, 0x00, 0x00, 0x00,                                  // packet_no = 0
+        0xA0, 0x0A, 0xA0, 0x0A,                                  // packet_signature = 178260640 (0x0AA00AA0)
+    ]);
+
+    let result = Packet::deserialize_packet(&bytes);
+    assert!(
+        matches!(result, Ok(Packet { data: Data::AppSpecific(_), .. })),
+        "msg type 213 did not parse as AppSpecific: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn test_status_with_auto_master_mode_1_parses() {
+    use crate::node::tcnet_packet::Packet;
+
+    // Spec page 7: AutoMasterMode values 0=Disabled, 1=HTP Master, 2=Link
+    // Master. The current enum has only `Variant = 0`, so any Status with
+    // auto_master_mode != 0 fails to deserialize and the dispatcher drops
+    // the whole packet.
+    let mut bytes = vec![
+        0x01, 0x00, 0x03, 0x06,
+        b'T', b'C', b'N', 5,                                     // message_type = Status
+        b'P', b'i', b'o', b'_', b'_', b'_', b'_', b'_',
+        0x00, 0x02,
+        0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+    ];
+    assert_eq!(bytes.len(), 24);
+    bytes.extend_from_slice(&[0x01, 0x00]);                      // node_count
+    bytes.extend_from_slice(&[0xff, 0xfd]);                      // listener_port
+    bytes.extend_from_slice(&[0u8; 6]);                          // _reserved0
+    bytes.extend_from_slice(&[0u8; 8]);                          // 8x layer_source
+    bytes.extend_from_slice(&[0u8; 8]);                          // 8x layer_status
+    bytes.extend_from_slice(&[0u8; 32]);                         // 8x layer_track_id
+    bytes.extend_from_slice(&[0]);                               // _reserved1 (byte 82)
+    bytes.extend_from_slice(&[25]);                              // smpte_mode (byte 83)
+    bytes.extend_from_slice(&[1]);                               // auto_master_mode = 1 (HTP Master) (byte 84)
+    bytes.extend_from_slice(&[0u8; 15]);                         // _reserved2
+    bytes.extend_from_slice(&[0u8; 72]);                         // app_specific
+    bytes.extend_from_slice(&[0u8; 16 * 8]);                     // 8x layer_name
+    assert_eq!(bytes.len(), 300);
+
+    let result = Packet::deserialize_packet(&bytes);
+    assert!(
+        result.is_ok(),
+        "Status with auto_master_mode=1 (HTP Master) failed to parse: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+#[serial]
+fn test_optout_emitted_on_drop() {
+    use crate::node::tcnet_packet::{Data, Packet};
+
+    let _ = env_logger::try_init();
+
+    // Pre-bind 60000 so the dispatcher takes the loopback-broadcast path
+    // and our listener can see its broadcast OptOut.
+    let listener = UdpSocket::bind("127.0.0.1:60000").expect("bind 60000");
+    listener.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+
+    // Start a client, let it broadcast OptIn for ~0.8 s, then drop it.
+    {
+        let _client = TCNetClient::new(ApplicationConfig::default());
+        sleep(Duration::from_millis(800));
+    }
+
+    // Drain incoming packets for 2 s looking for an OptOut.
+    let mut buf = [0u8; 8192];
+    let mut got_optout = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !got_optout && std::time::Instant::now() < deadline {
+        if let Ok((size, _)) = listener.recv_from(&mut buf) {
+            if let Ok(pkt) = Packet::deserialize_packet(&buf[..size]) {
+                if matches!(pkt.data, Data::OptOut(_)) {
+                    got_optout = true;
+                }
+            }
+        }
+    }
+    assert!(
+        got_optout,
+        "no OptOut packet observed after client drop — peers will rely on the 10 s silence timeout"
+    );
+}
+
+#[test]
+#[serial]
+fn test_empty_response_sends_error_notification() {
+    use crate::node::tcnet_packet::{Data, Packet};
+
+    let _ = env_logger::try_init();
+
+    let mut node_config = ApplicationConfig::default();
+    node_config.node_type = NodeType::Master;
+    let client = TCNetClient::new(node_config);
+    let _active = client.create_active_node();
+    // Deliberately do NOT load a track → response_data is empty.
+    sleep(Duration::from_millis(400));
+
+    let viewer = UdpSocket::bind("127.0.0.1:0").expect("bind viewer");
+    viewer.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+    let viewer_port = viewer.local_addr().unwrap().port();
+    let viewer_cfg = ApplicationConfig {
+        node_type: NodeType::Slave,
+        address: SocketAddrV4::new(Ipv4Addr::LOCALHOST, viewer_port),
+        ..node_config
+    };
+    let dest: SocketAddr = "127.0.0.1:60000".parse().unwrap();
+
+    let (h, d) = opt_in_bytes(&viewer_cfg, 0);
+    send_packet(&viewer, dest, h, d);
+    sleep(Duration::from_millis(200));
+
+    // Request data the active node has never cached.
+    let header = management_header(&viewer_cfg, 20, 1);
+    let req = RequestData {
+        data_type: RequestDataType::SmallWaveformData,
+        layer: LayerId::L1,
+    };
+    let payload = [header.to_bytes().unwrap(), req.to_bytes().unwrap()].concat();
+    viewer.send_to(&payload, dest).expect("send req");
+
+    let mut buf = [0u8; 8192];
+    let mut got_err = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !got_err && std::time::Instant::now() < deadline {
+        if let Ok((size, _)) = viewer.recv_from(&mut buf) {
+            if let Ok(pkt) = Packet::deserialize_packet(&buf[..size]) {
+                if matches!(pkt.data, Data::ErrorNotification(_)) {
+                    got_err = true;
+                }
+            }
+        }
+    }
+    assert!(
+        got_err,
+        "no ErrorNotification (code 014 = EMPTY) sent in response to a request for empty data"
+    );
+}
+
+#[test]
+fn test_dispatcher_has_single_seq_counter() {
+    // Structural: dispatcher::active_broadcast() must not maintain its own
+    // local SEQ counter alongside state.current_seq — two counters make
+    // outgoing SEQ bytes interleave between two independent sequences from
+    // a peer's perspective.
+    let src = include_str!("node/dispatcher.rs");
+    let count = src.matches("let mut seq").count();
+    assert_eq!(
+        count, 0,
+        "dispatcher.rs still has {} `let mut seq` local counter(s) competing with state.current_seq",
+        count
+    );
+}
+
+#[test]
+#[serial]
+fn test_status_unicast_only_to_slaves() {
+    use crate::node::tcnet_packet::{Data, Packet};
+
+    let _ = env_logger::try_init();
+
+    let mut master_cfg = ApplicationConfig::default();
+    master_cfg.node_type = NodeType::Master;
+    let client = TCNetClient::new(master_cfg);
+    let _active = client.create_active_node();
+    sleep(Duration::from_millis(400));
+
+    // Two fake peers: one Slave, one Master. Each binds an ephemeral port,
+    // registers via OptIn so the dispatcher knows about them.
+    let slave_sock = UdpSocket::bind("127.0.0.1:0").expect("bind slave");
+    slave_sock.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+    let slave_port = slave_sock.local_addr().unwrap().port();
+    let slave_cfg = ApplicationConfig {
+        node_type: NodeType::Slave,
+        address: SocketAddrV4::new(Ipv4Addr::LOCALHOST, slave_port),
+        ..master_cfg
+    };
+
+    let other_master = UdpSocket::bind("127.0.0.1:0").expect("bind other master");
+    other_master.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+    let other_master_port = other_master.local_addr().unwrap().port();
+    let other_master_cfg = ApplicationConfig {
+        node_type: NodeType::Master,
+        address: SocketAddrV4::new(Ipv4Addr::LOCALHOST, other_master_port),
+        ..master_cfg
+    };
+
+    let dest: SocketAddr = "127.0.0.1:60000".parse().unwrap();
+    let (h, d) = opt_in_bytes(&slave_cfg, 0);
+    send_packet(&slave_sock, dest, h, d);
+    let (h, d) = opt_in_bytes(&other_master_cfg, 0);
+    send_packet(&other_master, dest, h, d);
+    sleep(Duration::from_millis(200));
+
+    // Wait for the slave to receive a Status (precondition).
+    let mut buf = [0u8; 8192];
+    let mut slave_got_status = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while !slave_got_status && std::time::Instant::now() < deadline {
+        if let Ok((size, _)) = slave_sock.recv_from(&mut buf) {
+            if let Ok(pkt) = Packet::deserialize_packet(&buf[..size]) {
+                if matches!(pkt.data, Data::Status(_)) {
+                    slave_got_status = true;
+                }
+            }
+        }
+    }
+    assert!(
+        slave_got_status,
+        "precondition: Slave didn't receive Status — dispatcher not broadcasting?"
+    );
+
+    // Now check if the other Master received Status.
+    let mut master_got_status = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !master_got_status && std::time::Instant::now() < deadline {
+        if let Ok((size, _)) = other_master.recv_from(&mut buf) {
+            if let Ok(pkt) = Packet::deserialize_packet(&buf[..size]) {
+                if matches!(pkt.data, Data::Status(_)) {
+                    master_got_status = true;
+                }
+            }
+        }
+    }
+    assert!(
+        !master_got_status,
+        "Status was unicast to a Master peer (spec page 6: broadcast + unicast to all slaves)"
+    );
+}
+
+#[test]
+#[serial]
+fn test_dj_packet_publishes_correct_node_id() {
+    let _ = env_logger::try_init();
+
+    let mut client = TCNetClient::new(ApplicationConfig::default());
+    sleep(Duration::from_millis(400));
+
+    // Send a Metrics packet WITHOUT prior OptIn. is_dj_packet creates a
+    // ForeignNode with ApplicationConfig::default() — node_id = 0 — instead
+    // of lifting node_id from the packet's ManagementHeader.
+    let fake = UdpSocket::bind("127.0.0.1:0").expect("bind fake");
+    let fake_port = fake.local_addr().unwrap().port();
+    let cfg = ApplicationConfig {
+        node_id: 4242,
+        address: SocketAddrV4::new(Ipv4Addr::LOCALHOST, fake_port),
+        ..fake_config()
+    };
+    let dest: SocketAddr = "127.0.0.1:60000".parse().unwrap();
+    let (h, d) = metrics_l1_bytes(&cfg, 0);
+    send_packet(&fake, dest, h, d);
+    sleep(Duration::from_millis(400));
+
+    let nodes = client.active_nodes().to_vec();
+    let found = nodes
+        .iter()
+        .find(|n| n.has_dj_controller)
+        .expect("DJ packet should register a node with a DjController");
+    assert_eq!(
+        found.node_id, 4242,
+        "DJ packet arriving before OptIn published with node_id={} instead of 4242 \
+         (ForeignNode created with ApplicationConfig::default())",
+        found.node_id
+    );
+}
