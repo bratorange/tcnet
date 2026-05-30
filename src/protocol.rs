@@ -45,6 +45,65 @@ use deku::{DekuError, DekuRead, DekuReader, DekuWrite, DekuWriter};
 use std::fmt::{Debug, Formatter};
 use std::io::{Read, Seek, Write};
 
+// ---------------------------------------------------------------------------
+// Wire-layer error model
+//
+// Every wire-read function eventually folds into one of these. The variants
+// are deliberately flat — nested `DekuError`s do not leak to callers.
+// Marked `#[non_exhaustive]` so spec extensions can grow the surface without
+// breaking downstream `match` patterns.
+// ---------------------------------------------------------------------------
+
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WireError {
+    /// Buffer ran out of bytes before the field was complete.
+    Truncated {
+        want: usize,
+        have: usize,
+        at: &'static str,
+    },
+    /// Discriminant outside the spec-defined value set for an enum.
+    InvalidEnum {
+        name: &'static str,
+        value: u32,
+    },
+    /// Bytes that should have been ASCII / UTF-8 / UTF-16 weren't.
+    InvalidEncoding { at: &'static str },
+    /// `ManagementHeader._header` magic was not `"TCN"`.
+    InvalidMagic { got: [u8; 3] },
+    /// Message-type byte didn't match any known protocol message.
+    UnknownMessageType(u8),
+    /// A typed value (BPM, Speed, LayerIdx, …) failed its domain check.
+    BadValue {
+        at: &'static str,
+        why: &'static str,
+    },
+}
+
+impl std::fmt::Display for WireError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Truncated { want, have, at } => {
+                write!(f, "truncated at {}: want {}, have {}", at, want, have)
+            }
+            Self::InvalidEnum { name, value } => {
+                write!(f, "invalid {} discriminant {}", name, value)
+            }
+            Self::InvalidEncoding { at } => write!(f, "invalid encoding at {}", at),
+            Self::InvalidMagic { got } => write!(
+                f,
+                "invalid magic: expected 'TCN', got {:?}",
+                std::str::from_utf8(got).unwrap_or("?")
+            ),
+            Self::UnknownMessageType(b) => write!(f, "unknown message type: {}", b),
+            Self::BadValue { at, why } => write!(f, "bad value at {}: {}", at, why),
+        }
+    }
+}
+
+impl std::error::Error for WireError {}
+
 /// 16-bit identifier carried in every [`ManagementHeader`].
 pub type NodeId = u16;
 
@@ -363,6 +422,21 @@ impl Speed {
     pub const NORMAL: Speed = Speed(32768);
     /// Stopped (0 / 0%).
     pub const STOPPED: Speed = Speed(0);
+    /// Upper bound: 200% playback, spec page 14 says `0-65536`.
+    pub const MAX_RAW: u32 = 65_536;
+
+    /// Construct a [`Speed`] from a raw wire integer, enforcing the
+    /// spec-stated `0..=65_536` range. Returns [`WireError::BadValue`] on
+    /// out-of-range input.
+    pub fn try_new(raw: u32) -> Result<Self, WireError> {
+        if raw > Self::MAX_RAW {
+            return Err(WireError::BadValue {
+                at: "Speed",
+                why: "raw value > 65_536 (spec page 14)",
+            });
+        }
+        Ok(Self(raw))
+    }
 
     /// Return the speed as a percentage (`100.0` = normal speed).
     pub fn as_percent(self) -> f32 {
@@ -379,6 +453,26 @@ impl Speed {
 pub struct Bpm(pub u32);
 
 impl Bpm {
+    /// Construct a [`Bpm`] from a floating-point BPM value (e.g. `134.0`).
+    /// Returns [`WireError::BadValue`] on non-finite (`NaN`, `±inf`) or
+    /// non-positive input — those values would either OOM the beat-grid
+    /// synthesiser or yield a wire value the spec doesn't allow.
+    pub fn try_from_f32(v: f32) -> Result<Self, WireError> {
+        if !v.is_finite() {
+            return Err(WireError::BadValue {
+                at: "Bpm",
+                why: "value is NaN or infinite",
+            });
+        }
+        if v <= 0.0 {
+            return Err(WireError::BadValue {
+                at: "Bpm",
+                why: "value must be > 0",
+            });
+        }
+        Ok(Self((v * 100.0).round() as u32))
+    }
+
     /// Return the BPM as a floating-point value.
     pub fn as_f32(self) -> f32 {
         self.0 as f32 / 100.0
@@ -1242,5 +1336,71 @@ impl CueData {
     }
     pub fn cues(&self) -> &[CueEntry; 18] {
         &self.cues
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Wire-layer type tests (port-free)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod wire_type_tests {
+    use super::*;
+
+    #[test]
+    fn bpm_try_from_f32_accepts_typical_values() {
+        assert_eq!(Bpm::try_from_f32(120.0).unwrap(), Bpm(12_000));
+        assert_eq!(Bpm::try_from_f32(174.50).unwrap(), Bpm(17_450));
+        assert_eq!(Bpm::try_from_f32(0.01).unwrap(), Bpm(1));
+    }
+
+    #[test]
+    fn bpm_try_from_f32_rejects_non_finite_and_non_positive() {
+        assert!(matches!(
+            Bpm::try_from_f32(f32::NAN),
+            Err(WireError::BadValue { at: "Bpm", .. })
+        ));
+        assert!(matches!(
+            Bpm::try_from_f32(f32::INFINITY),
+            Err(WireError::BadValue { at: "Bpm", .. })
+        ));
+        assert!(matches!(
+            Bpm::try_from_f32(f32::NEG_INFINITY),
+            Err(WireError::BadValue { at: "Bpm", .. })
+        ));
+        assert!(matches!(
+            Bpm::try_from_f32(0.0),
+            Err(WireError::BadValue { at: "Bpm", .. })
+        ));
+        assert!(matches!(
+            Bpm::try_from_f32(-1.0),
+            Err(WireError::BadValue { at: "Bpm", .. })
+        ));
+    }
+
+    #[test]
+    fn speed_try_new_accepts_in_range_and_rejects_above_65536() {
+        assert_eq!(Speed::try_new(0).unwrap(), Speed::STOPPED);
+        assert_eq!(Speed::try_new(32_768).unwrap(), Speed::NORMAL);
+        assert_eq!(Speed::try_new(65_536).unwrap(), Speed(65_536));
+        assert!(matches!(
+            Speed::try_new(65_537),
+            Err(WireError::BadValue { at: "Speed", .. })
+        ));
+        assert!(matches!(
+            Speed::try_new(u32::MAX),
+            Err(WireError::BadValue { at: "Speed", .. })
+        ));
+    }
+
+    #[test]
+    fn wire_error_is_send_sync_and_displays() {
+        fn _is_send_sync<T: Send + Sync + 'static>() {}
+        _is_send_sync::<WireError>();
+        let e = WireError::BadValue {
+            at: "Bpm",
+            why: "value must be > 0",
+        };
+        assert!(format!("{}", e).contains("Bpm"));
     }
 }
