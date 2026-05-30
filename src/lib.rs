@@ -208,8 +208,11 @@ impl From<&ForeignNode> for ForeignNodeInfo {
 pub struct TCNetClient {
     _runtime: Runtime,
     dispatcher: Arc<Dispatcher>,
-    nodes_output: triple_buffer::Output<Vec<ForeignNodeInfo>>,
-    cached_nodes: Vec<ForeignNodeInfo>,
+    /// Wait-free atomic snapshot of the published discovered-nodes vector.
+    nodes_snapshot: Arc<arc_swap::ArcSwap<Vec<ForeignNodeInfo>>>,
+    /// Cached Arc handle returned by the last `active_nodes()` call so we
+    /// can hand out `&[ForeignNodeInfo]` with a stable lifetime.
+    cached_nodes: Arc<Vec<ForeignNodeInfo>>,
     active_broadcast_tx: kanal::Sender<Data>,
     active_slave_unicast_tx: kanal::Sender<Data>,
     active_time_tx: kanal::Sender<Data>,
@@ -232,8 +235,9 @@ impl TCNetClient {
             .expect("Could not start tokio runtime");
 
         let (outgoing_tx, outgoing_rx) = kanal::bounded::<OutgoingRequest>(256);
-        let (nodes_input, nodes_output) =
-            triple_buffer::triple_buffer(&Vec::<ForeignNodeInfo>::new());
+        let nodes_snapshot = Arc::new(arc_swap::ArcSwap::from_pointee(
+            Vec::<ForeignNodeInfo>::new(),
+        ));
         let (active_broadcast_tx, active_broadcast_rx) = kanal::bounded::<Data>(512);
         let (active_slave_unicast_tx, active_slave_unicast_rx) = kanal::bounded::<Data>(512);
         let (active_time_tx, active_time_rx) = kanal::bounded::<Data>(512);
@@ -246,7 +250,7 @@ impl TCNetClient {
             state: Arc::new(RwLock::new(DynamicNodeState::default())),
             outgoing_tx,
             outgoing_rx,
-            nodes_buf_input: Arc::new(Mutex::new(nodes_input)),
+            nodes_snapshot: nodes_snapshot.clone(),
             active_broadcast_rx,
             active_slave_unicast_rx,
             active_time_rx,
@@ -259,8 +263,8 @@ impl TCNetClient {
         Self {
             _runtime: runtime,
             dispatcher,
-            nodes_output,
-            cached_nodes: Vec::new(),
+            nodes_snapshot,
+            cached_nodes: Arc::new(Vec::new()),
             active_broadcast_tx,
             active_slave_unicast_tx,
             active_time_tx,
@@ -273,8 +277,9 @@ impl TCNetClient {
     /// This is a snapshot — calling it again later returns an updated list.
     /// Nodes that have not been heard from for ≥ 10 s are dropped automatically.
     pub fn active_nodes(&mut self) -> &[ForeignNodeInfo] {
-        self.cached_nodes = self.nodes_output.read().clone();
-        &self.cached_nodes
+        // Wait-free load of the most recent published snapshot.
+        self.cached_nodes = self.nodes_snapshot.load_full();
+        self.cached_nodes.as_slice()
     }
 
     /// Attach a reader to the foreign DJ controller node at `addr`.

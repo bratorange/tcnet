@@ -16,7 +16,7 @@ use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use arc_swap::ArcSwap;
 use std::sync::atomic::{AtomicU16, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::UdpSocket;
 use tokio::spawn;
@@ -31,7 +31,10 @@ pub struct Dispatcher {
     pub(crate) state: Arc<RwLock<DynamicNodeState>>,
     pub(crate) outgoing_tx: kanal::Sender<OutgoingRequest>,
     pub(crate) outgoing_rx: kanal::Receiver<OutgoingRequest>,
-    pub(crate) nodes_buf_input: Arc<Mutex<triple_buffer::Input<Vec<ForeignNodeInfo>>>>,
+    /// Published list of discovered foreign nodes. Single writer (the
+    /// dispatcher main flow), many readers via `TCNetClient::active_nodes`.
+    /// Wait-free atomic pointer swap — no lock.
+    pub(crate) nodes_snapshot: Arc<ArcSwap<Vec<ForeignNodeInfo>>>,
     /// Packets broadcast on port 60000 (Status, OptIn).
     pub(crate) active_broadcast_rx: kanal::Receiver<Data>,
     /// Packets unicast to each slave node (Metrics, Meta, Mixer).
@@ -132,14 +135,14 @@ fn is_dj_packet(data: &Data) -> bool {
 
 fn publish_nodes_snapshot(
     state: &DynamicNodeState,
-    nodes_input: &Arc<Mutex<triple_buffer::Input<Vec<ForeignNodeInfo>>>>,
+    nodes_snapshot: &Arc<ArcSwap<Vec<ForeignNodeInfo>>>,
 ) {
     let snapshot: Vec<ForeignNodeInfo> = state
         .discovered_nodes
         .values()
         .map(ForeignNodeInfo::from)
         .collect();
-    nodes_input.lock().unwrap().write(snapshot);
+    nodes_snapshot.store(Arc::new(snapshot));
 }
 
 async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Result<()> {
@@ -178,7 +181,7 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
                                 // Update address/config on each OptIn in case port changed.
                                 node.address = node_config.address;
                                 node.config = node_config;
-                                publish_nodes_snapshot(&state, &dispatcher.nodes_buf_input);
+                                publish_nodes_snapshot(&state, &dispatcher.nodes_snapshot);
                             }
 
                             OptOut(_) => {
@@ -192,7 +195,7 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
                                 } else {
                                     info!("Node {} has opted out of the network", src_ip);
                                 }
-                                publish_nodes_snapshot(&state, &dispatcher.nodes_buf_input);
+                                publish_nodes_snapshot(&state, &dispatcher.nodes_snapshot);
                             }
 
                             Data::Request(req) => {
@@ -307,7 +310,7 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
                                 });
 
                             if created_new_ctrl {
-                                publish_nodes_snapshot(&state, &dispatcher.nodes_buf_input);
+                                publish_nodes_snapshot(&state, &dispatcher.nodes_snapshot);
                             }
                         }
                     }
@@ -478,7 +481,7 @@ async fn timeout_foreign_nodes(node: Arc<Dispatcher>) {
                 }
                 keep
             });
-            publish_nodes_snapshot(&state, &node.nodes_buf_input);
+            publish_nodes_snapshot(&state, &node.nodes_snapshot);
         }
     }
 }
