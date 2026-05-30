@@ -76,11 +76,34 @@
 //!
 //! ## Module layout
 //!
+//! ### Legacy single-binary API (current, stable)
+//!
 //! * [`protocol`] — wire-format types: every packet payload struct, plus helper
 //!   types ([`LayerId`], [`LayerState`], [`Bpm`], [`Speed`], …).
 //! * [`view`] — read-only consumer view of a discovered foreign node.
 //!
 //! Most users only need the types re-exported at the crate root.
+//!
+//! ### Layered next-generation modules (additive, 0.1.x)
+//!
+//! `ARCHITECTURE.md` describes a six-layer rewrite — wire / transport /
+//! session / protocol-machines / domain / runtime — capped with a typed
+//! `api::Node<R, V>` surface.  These modules ship today alongside the
+//! legacy surface; downstream code can adopt them at its own pace.
+//!
+//! * [`spec_version`] — `SpecVersion` + `Flame` + `IncludesFlame<F>`
+//!   relation; `PeerVersion` runtime carrier.
+//! * [`transport`] — `Transport` trait + `Channel` taxonomy +
+//!   `MemoryTransport` (loopback) + `UdpTransport` (real network) +
+//!   `BufferPool`.
+//! * [`session`] — single-actor `SessionTask` with `Peer<…>` state
+//!   machine, election FSM, snapshot publication via `ArcSwap`.
+//! * [`proto`] — protocol machines: `ChunkedFrame<T>`, `TimeSync`,
+//!   `ControlPath`, `TextMessage`, `KeyPress`, `AppSpecificReassembler`,
+//!   `Pending<T>` / `RequestError`.
+//! * [`domain`] — `DomainLayerSnapshot` + `TimestampOrdered<T>` writer.
+//! * [`runtime`] — drift-corrected `Ticker` for the RT hot path.
+//! * [`api`] — typed `Node<R: Role, V: SpecVersion>` + `NodeBuilder`.
 //!
 //! ## Implementation status
 //!
