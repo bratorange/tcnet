@@ -19,7 +19,9 @@
 //! * [`task`] — the actor itself (phase 4.3).
 
 pub mod auth;
+pub mod election;
 pub mod peer;
 
 pub use auth::PeerAuth;
+pub use election::{Election, ElectionCandidate, ElectionState, ElectionWinner};
 pub use peer::{LeaveReason, PEER_TIMEOUT, Peer, PeerActive, PeerAnnouncing, PeerLeaving};
