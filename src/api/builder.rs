@@ -1,9 +1,9 @@
 //! `NodeBuilder` — fluent construction of typed `Node<R, V>` handles.
 //!
-//! Hides the legacy `TCNetClient` + `ActiveDJNode` engine plumbing
-//! behind a sensibly-defaulted builder so library users don't have
-//! to think about the runtime / dispatcher / sockets — matching the
-//! "convenience stays inside the lib" architectural constraint.
+//! Hides the runtime / dispatcher / socket plumbing behind a
+//! sensibly-defaulted builder so library users don't have to think
+//! about it — matching the "convenience stays inside the lib"
+//! architectural constraint.
 
 use super::node::{Node, NodeError, from_engine};
 use super::roles::{Master, Role};
@@ -89,15 +89,14 @@ impl<R: Role, V: SpecVersion> NodeBuilder<R, V> {
 
     /// Spawn the node and return its typed handle.
     ///
-    /// This is sync (not `async`): the internal engine
-    /// ([`TCNetClient`]) spawns its own tokio runtime, so the caller
-    /// doesn't need one.  If you already have a tokio runtime running,
-    /// `spawn` is safe to call from inside it — the engine's runtime
-    /// is independent.
+    /// Sync (not `async`): the node spawns its own dedicated tokio
+    /// runtime internally, so the caller doesn't need one.  If you
+    /// already have a tokio runtime running, `spawn` is safe to call
+    /// from inside it — the spawned runtime is independent.
     ///
-    /// For `R = Master`, the builder also calls `create_active_node`
-    /// so the returned handle has the full broadcast surface via
-    /// `Deref<Target = ActiveDJNode>`.
+    /// For `R = Master`, the builder also wires up the broadcaster so
+    /// the returned handle exposes the `set_*` / `load_track` /
+    /// `broadcast_*` surface via `Deref`.
     pub fn spawn(self) -> Result<Node<R, V>, NodeError> {
         let client = TCNetClient::new(self.config);
         let active = if TypeId::of::<R>() == TypeId::of::<Master>() {

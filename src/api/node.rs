@@ -1,24 +1,25 @@
 //! `Node<R, V>` — the typed public API surface.
 //!
-//! This module is the type-system payoff of phases 1-7: the layered
-//! design (wire / transport / session / proto / domain / runtime)
-//! manifests above the line as a single
+//! The layered design (wire / transport / session / proto / domain /
+//! runtime) manifests above the line as a single
 //! `Node<R: Role, V: SpecVersion>` handle, parameterised on the local
-//! role and spec version.  Internally `Node` wraps the legacy
-//! [`TCNetClient`](crate::TCNetClient) engine for now — the public
-//! surface is the typed shape; the implementation will migrate to
-//! `SessionTask` + `UdpTransport` incrementally.
+//! role and spec version.
 //!
-//! The methods enforced at the type level:
+//! Methods enforced at the type level:
 //!
-//! * `Node<Slave, V>` — `snapshot`, `layers_for`, `mixer_for`,
-//!   `request_*`, `leave`.
-//! * `Node<Master, V>` — derefs to
-//!   [`ActiveDJNode`](crate::ActiveDJNode), so every broadcast / set
-//!   method on the active node is reachable through the typed handle.
-//! * `Node<Auto, V>` — Slave methods plus a `.wait_election()` future
-//!   that resolves into `Node<Master, V>` or `Node<Slave, V>`
-//!   (implementation deferred — see crate-level docs).
+//! * `Node<Slave, V>` — [`snapshot`](Node::snapshot),
+//!   [`layers_for`](Node::layers_for),
+//!   [`mixer_for`](Node::mixer_for),
+//!   `request_*`, [`leave`](Node::leave),
+//!   [`clock_offset_for`](Node::clock_offset_for),
+//!   [`election_state`](Node::election_state).
+//! * `Node<Master, V>` — Slave methods plus `Deref<Target = …>` to
+//!   the broadcaster handle: `set_speed`, `set_bpm`, `set_layer_position`,
+//!   `set_cue_marker`, `set_hot_cues`, `load_track`, `set_master_fader`,
+//!   `set_crossfader`, `set_channel_*`, `set_response_*`, ...
+//! * `Node<Auto, V>` — Slave methods plus (planned) `.wait_election()`
+//!   resolving into `Node<Master, V>` if we win the election or
+//!   `Node<Slave, V>` if we lose.
 
 use super::roles::{Master, Role, Slave};
 use crate::node::dj_controller::{LayerSnapshot, MixerSnapshot, TimeoutError};
@@ -30,10 +31,6 @@ use std::marker::PhantomData;
 use std::net::SocketAddrV4;
 
 /// One foreign-node row in [`NodeSnapshot::peers`].
-///
-/// Direct replacement for the legacy [`ForeignNodeInfo`] —
-/// re-exposed at the typed surface so downstream code doesn't have
-/// to reach into the engine module.
 #[derive(Clone, Debug)]
 pub struct PeerInfo {
     /// The peer's listener address (IP + unicast port).
@@ -119,12 +116,11 @@ impl From<TimeoutError> for NodeError {
 pub struct Node<R: Role, V: SpecVersion> {
     client: TCNetClient,
     active: Option<ActiveDJNode>,
-    /// Cache of per-peer `DjControllerView`s. The underlying triple
-    /// buffer for each peer is consumable exactly once
-    /// ([`TCNetClient::get_controller_view`] semantics), so we claim
-    /// it on first access for each peer and keep it around for the
-    /// lifetime of the `Node` — making `layers_for` / `mixer_for` /
-    /// `request_*` idempotent across calls on the same address.
+    /// Per-peer view cache.  Reads are lock-free via the per-peer
+    /// `Arc<ArcSwap<DjControllerState>>` — claiming a view here just
+    /// clones the `Arc`; we keep it around for the lifetime of the
+    /// `Node` so `layers_for` / `mixer_for` / `request_*` calls on
+    /// the same address share state.
     views: HashMap<SocketAddrV4, DjControllerView>,
     _r: PhantomData<R>,
     _v: PhantomData<V>,
@@ -145,9 +141,9 @@ impl<R: Role, V: SpecVersion> Node<R, V> {
         }
     }
 
-    /// Cleanly leave the network.  Consumes `self` — the legacy
-    /// engine's `Drop` already broadcasts a best-effort OptOut, so
-    /// this just lets it run.
+    /// Cleanly leave the network.  Consumes `self` — `Drop` broadcasts
+    /// a best-effort OptOut packet to every discovered peer + the
+    /// loopback fallback before the runtime tears down.
     pub async fn leave(self) -> Result<(), NodeError> {
         drop(self);
         Ok(())
@@ -173,10 +169,9 @@ impl<R: Role, V: SpecVersion> Node<R, V> {
         self.client.election_state()
     }
 
-    /// Escape hatch: handle to the internal tokio runtime so callers
-    /// can spawn supplementary async work (e.g. background waveform /
-    /// cue pulls) without standing up a second runtime.  Mirrors
-    /// [`TCNetClient::runtime_handle`](crate::TCNetClient::runtime_handle).
+    /// Handle to the internal tokio runtime so callers can spawn
+    /// supplementary async work (e.g. background waveform / cue
+    /// pullers) without standing up a second runtime.
     pub fn runtime_handle(&self) -> tokio::runtime::Handle {
         self.client.runtime_handle()
     }
@@ -184,7 +179,7 @@ impl<R: Role, V: SpecVersion> Node<R, V> {
 
 // Slave-specific read methods.
 impl<V: SpecVersion> Node<Slave, V> {
-    /// Lazily claim (and cache) the [`DjControllerView`] for `addr`.
+    /// Lazily claim (and cache) the per-peer view for `addr`.
     /// Returns `None` if no DJ-controller-bearing peer is registered
     /// at that address yet.
     fn view_for_mut(&mut self, addr: SocketAddrV4) -> Option<&mut DjControllerView> {
@@ -212,19 +207,13 @@ impl<V: SpecVersion> Node<Slave, V> {
         Some(view.get_mixer().clone())
     }
 
-    /// Escape hatch: a `Send + 'static` [`WaveformRequester`] for
-    /// `addr` that can be moved into a `tokio::spawn`ed background
-    /// task — handy for long-lived pullers that need to outlive a
-    /// borrow of `&mut Node`.
+    /// A `Send + 'static` [`WaveformRequester`] for `addr` that can be
+    /// moved into a `tokio::spawn`ed background task — for long-lived
+    /// pullers that need to outlive a borrow of `&mut Node`.
     ///
     /// Prefer [`Node::request_small_waveform`] / `request_big_waveform`
     /// / `request_beat_grid` / `request_cue_data` for inline awaits.
-    ///
     /// Returns `None` if no controller is associated with `addr` yet.
-    ///
-    /// Slated for removal in 0.3.0 when `Node::pending_*` futures land
-    /// to replace the spawn-into-background pattern with a
-    /// `'static`-friendly `Pending<T>`.
     pub fn waveform_requester_for(&mut self, addr: SocketAddrV4) -> Option<WaveformRequester> {
         let view = self.view_for_mut(addr)?;
         Some(view.waveform_requester())
@@ -290,14 +279,14 @@ impl<V: SpecVersion> Node<Slave, V> {
     }
 }
 
-// Master-specific deref into ActiveDJNode so every set_* / load_track
-// / broadcast method lights up on `&mut Node<Master, V>`.
+// Master-specific deref into the broadcaster handle so every set_* /
+// load_track / broadcast method lights up on `&mut Node<Master, V>`.
 impl<V: SpecVersion> std::ops::Deref for Node<Master, V> {
     type Target = ActiveDJNode;
     fn deref(&self) -> &Self::Target {
         self.active
             .as_ref()
-            .expect("Node<Master, _> always has an ActiveDJNode")
+            .expect("Node<Master, _> always has a broadcaster")
     }
 }
 
@@ -305,7 +294,7 @@ impl<V: SpecVersion> std::ops::DerefMut for Node<Master, V> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.active
             .as_mut()
-            .expect("Node<Master, _> always has an ActiveDJNode")
+            .expect("Node<Master, _> always has a broadcaster")
     }
 }
 

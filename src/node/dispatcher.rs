@@ -48,7 +48,7 @@ pub struct Dispatcher {
     pub(crate) outgoing_tx: kanal::Sender<OutgoingRequest>,
     pub(crate) outgoing_rx: kanal::Receiver<OutgoingRequest>,
     /// Published list of discovered foreign nodes. Single writer (the
-    /// dispatcher main flow), many readers via `TCNetClient::active_nodes`.
+    /// dispatcher main flow), many readers via the public API.
     /// Wait-free atomic pointer swap — no lock.
     pub(crate) nodes_snapshot: Arc<ArcSwap<Vec<ForeignNodeInfo>>>,
     /// Packets broadcast on port 60000 (Status, OptIn).
@@ -781,7 +781,9 @@ async fn timeout_foreign_nodes(node: Arc<Dispatcher>) {
     }
 }
 
-/// Drains packets queued by `ActiveDJNode` and sends them on the appropriate sockets.
+/// Drains packets queued by the Master broadcaster and sends them on
+/// the appropriate sockets (Status broadcast + slave unicast, Metrics
+/// / Meta / Mixer unicast, Time broadcast + per-peer unicast).
 async fn active_broadcast(
     dispatcher: Arc<Dispatcher>,
     socket_60000: Arc<UdpSocket>,

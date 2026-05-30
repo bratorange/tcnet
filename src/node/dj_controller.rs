@@ -18,8 +18,8 @@ use tokio::sync::oneshot;
 /// Decoded snapshot of a foreign mixer's state.
 ///
 /// Built from incoming [`MixerData`](crate::protocol::MixerData) packets and
-/// republished through a triple buffer to
-/// [`DjControllerView::get_mixer`](crate::DjControllerView::get_mixer).
+/// republished via `ArcSwap<DjControllerState>` to readers (notably
+/// [`Node::mixer_for`](crate::api::Node::mixer_for)).
 /// All 8-bit level / EQ / filter fields range over `0..=255`.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct MixerSnapshot {
@@ -156,8 +156,8 @@ impl From<&MixerChannel> for ChannelSnapshot {
 /// [`MetricsData`](crate::protocol::MetricsData),
 /// [`MetaData`](crate::protocol::MetaData) and
 /// [`TimePacketData`](crate::protocol::TimePacketData) packets into one
-/// flattened view. Republished through a triple buffer to
-/// [`DjControllerView::get_layers`](crate::DjControllerView::get_layers).
+/// flattened view. Republished via `ArcSwap<DjControllerState>` to
+/// readers (notably [`Node::layers_for`](crate::api::Node::layers_for)).
 ///
 /// `current_time_ms` (from Time packets, updated ~20 ms) is the most
 /// frequently refreshed position field. `position_ms` (from Metrics packets,
@@ -210,9 +210,10 @@ impl LayerSnapshot {
 /// Combined snapshot of one foreign DJ controller: all eight
 /// [`LayerSnapshot`]s plus one [`MixerSnapshot`].
 ///
-/// Passed through a triple buffer to [`DjControllerView`](crate::DjControllerView).
-/// `layers` is always indexed in [`LayerId::ALL`](crate::LayerId::ALL) order
-/// (`L1, L2, L3, L4, LA, LB, LM, LC`).
+/// Published via `Arc<ArcSwap<DjControllerState>>` per peer; readers
+/// `load_full()` for lock-free wait-free access.  `layers` is always
+/// indexed in [`LayerId::ALL`](crate::LayerId::ALL) order (`L1, L2,
+/// L3, L4, LA, LB, LM, LC`).
 #[derive(Clone, Debug)]
 pub struct DjControllerState {
     pub layers: Vec<LayerSnapshot>,
@@ -235,9 +236,8 @@ impl Default for DjControllerState {
 // Public error type
 // ---------------------------------------------------------------------------
 
-/// Returned when a [`DjControllerView`](crate::DjControllerView) request for
-/// waveform / beat-grid / artwork data does not receive a response within 5 s
-/// (or the underlying request channel has been closed).
+/// Returned when a `Node::request_*` call does not receive a response
+/// within 5 s, or the underlying request channel has been closed.
 #[derive(Debug)]
 pub struct TimeoutError;
 
@@ -279,17 +279,15 @@ pub(crate) struct OutgoingRequest {
 
 /// Per-foreign-node controller handle.  All fields are `Clone` so the
 /// containing `ForeignNode` can sit inside an
-/// `Arc<ArcSwap<HashMap<…>>>` without a `Mutex`/`RwLock` to coordinate
-/// take-once buffer ownership (the old design used
-/// `triple_buffer::Output` which was take-once; the new design
-/// publishes via `Arc<ArcSwap<DjControllerState>>` which any number
-/// of readers can `load_full` concurrently).
+/// `Arc<ArcSwap<HashMap<…>>>` without a `Mutex` / `RwLock` for
+/// coordination.  State publishes via `Arc<ArcSwap<DjControllerState>>`
+/// — any number of readers `load_full` concurrently.
 #[derive(Debug, Clone)]
 pub(crate) struct DjController {
     pub packet_tx: kanal::Sender<Packet>,
     pub request_tx: kanal::Sender<UserRequest>,
     /// Wait-free publication of the merged DJ-controller state.
-    /// The dj-controller task writes; every `DjControllerView` reads.
+    /// The dj-controller task writes; every reader `load_full`s.
     pub state: Arc<ArcSwap<DjControllerState>>,
 }
 
@@ -787,7 +785,7 @@ async fn dj_controller_task(
 }
 
 // ---------------------------------------------------------------------------
-// Packet → state apply logic (ported from DjControllerView::apply)
+// Packet → state apply logic
 // ---------------------------------------------------------------------------
 
 fn apply_packet(

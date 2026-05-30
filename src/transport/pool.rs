@@ -29,8 +29,9 @@ use crossbeam_queue::ArrayQueue;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
-/// Per-slot byte capacity.  Matches the legacy `8192` constant in
-/// `dispatcher::listen`.
+/// Per-slot byte capacity — comfortably larger than any spec-defined
+/// TCNet datagram (BeatGrid / BigWaveform chunks are ~2.5 KB at the
+/// largest), well short of the 64 KB UDP cap.
 pub const SLOT_SIZE: usize = 8192;
 
 /// Lock-free pool of [`SLOT_SIZE`]-byte buffer slots.

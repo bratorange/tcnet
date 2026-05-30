@@ -1,29 +1,17 @@
 //! # tcnet
 //!
-//! A Rust implementation of the **TCNet** UDP protocol — a network protocol used by
-//! professional DJ / VJ gear (Pioneer / ProDJ Link adjacent) for synchronising
-//! playback state, mixer state, beat-grid information and waveform previews between
-//! networked nodes.
+//! A Rust implementation of the **TCNet** UDP protocol used by professional
+//! DJ / VJ gear (Pioneer ProDJ-adjacent) for synchronising playback state,
+//! mixer state, beat grids, waveforms and timecode between networked nodes.
 //!
-//! This crate covers protocol version `3.6` (the value emitted in every outgoing
-//! [`ManagementHeader`](crate::protocol::ManagementHeader)) and supports both roles:
+//! This crate speaks protocol version **3.6** (the value carried in every
+//! outgoing [`ManagementHeader`](crate::protocol::ManagementHeader)).  Per-field
+//! introduction versions ("FLAMEs" in spec language) are tagged via the
+//! [`spec_version`] module so consumers can reason about cross-version
+//! compatibility at compile time.
 //!
-//! * **Passive observer** — discover foreign DJ controller nodes broadcasting on the
-//!   network and read their state through [`DjControllerView`]. Useful for VJ tools,
-//!   visualisers, lighting controllers, analytics, etc.
-//! * **Active broadcaster** — present this process as a virtual DJ node via
-//!   [`ActiveDJNode`]: announce up to eight layers of playback, push Time / Status /
-//!   Metrics / Meta / Mixer packets, and serve pre-built waveform / beat-grid / cue /
-//!   artwork responses on request.
-//!
-//! ## Specification
-//!
-//! The packet layouts, message-type IDs and field meanings all follow the official
-//! spec, available here:
-//!
-//! <https://www.tc-supply.com/_files/ugd/b1c714_0b351a4099c14e738f0cd7fcea623265.pdf>
-//!
-//! Citations elsewhere in these docs link back to that PDF.
+//! The full TCNet V3.5.1B spec is vendored under `docs/spec/` next to a
+//! compliance audit at [`docs/SPEC_AUDIT_V3_5_1B.md`](../../docs/SPEC_AUDIT_V3_5_1B.md).
 //!
 //! ## Quick start
 //!
@@ -44,7 +32,8 @@
 //!         if peer.has_dj_controller {
 //!             if let Some(layers) = node.layers_for(peer.address) {
 //!                 for (i, layer) in layers.iter().enumerate() {
-//!                     println!("L{}: {:?} @ {:.1} BPM", i + 1, layer.state, layer.bpm.as_f32());
+//!                     println!("L{}: {:?} @ {:.1} BPM",
+//!                              i + 1, layer.state, layer.bpm.as_f32());
 //!                 }
 //!             }
 //!         }
@@ -53,105 +42,95 @@
 //! }
 //! ```
 //!
+//! For an active-broadcaster role (emulate a virtual CDJ), parameterise the
+//! builder on [`api::Master`](crate::api::Master) instead — the returned
+//! [`Node<Master, V3_6>`](crate::api::Node) `Deref`s to the inner broadcaster
+//! handle whose `set_*` / `load_track` / `broadcast_*` methods drive the wire.
+//!
 //! ## Architecture
 //!
+//! Six layers, all lock-free internally (no `Mutex` / `RwLock` anywhere):
+//!
 //! ```text
-//!                                ┌──────────────────────────────┐
-//!                                │ TCNetClient                  │
-//!                                │   • spawns tokio runtime     │
-//!                                │   • binds UDP sockets        │
-//!                                │   • runs OptIn discovery     │
-//!  network                       │   • dispatches packets       │
-//! ──────────                     │                              │
-//!  60000 ── broadcast ◀──────────┤                              │
-//!  60001 ── time     ◀──────────►│        Dispatcher            │◀── ActiveDJNode (broadcast role)
-//!  60002 ── broadcast ◀──────────┤                              │
-//!  port  ── unicast   ◀──────────┤                              │
-//!                                │                              │
-//!                                │   per-foreign-node triple    │
-//!                                │   buffer ──────────────────► │── DjControllerView (read role)
-//!                                └──────────────────────────────┘
+//!  ┌─────────────────────────── api::Node<R, V> ────────────────────────────┐
+//!  │  typed handle — role gating (Slave/Master/Auto), FLAME gating          │
+//!  └────┬───────────┬───────────────┬──────────────────────┬───────────────┘
+//!       │ snapshot  │ request_*     │ broadcast_* / set_*  │ TimeSync /
+//!       ▼           ▼               ▼  (Master)            ▼ Election
+//!  ┌────────┐  ┌──────────┐  ┌────────────────┐  ┌────────────────────┐
+//!  │ domain │  │  proto   │  │   session      │  │ runtime (Ticker)   │
+//!  │ writer │  │ machines │  │ single-actor   │  │ drift-corrected    │
+//!  └────────┘  └──────────┘  │ ArcSwap snaps  │  └────────────────────┘
+//!                            └───────┬────────┘
+//!                                    ▼
+//!                            ┌──────────────────┐
+//!                            │   transport      │
+//!                            │ UDP 60000 / 60001│
+//!                            │ 60002 / 65023+   │
+//!                            └──────────────────┘
 //! ```
 //!
-//! ## Module layout
+//! ## Modules
 //!
-//! ### Legacy single-binary API (current, stable)
+//! * [`api`] — typed `Node<R: Role, V: SpecVersion>` + `NodeBuilder` (start here).
+//! * [`spec_version`] — `SpecVersion` markers, `Flame` per-field introduction
+//!   tags, `IncludesFlame<F>` relation for compile-time version gating,
+//!   `PeerVersion` runtime carrier.
+//! * [`protocol`] — wire-format payload types: every packet struct, plus
+//!   helper newtypes ([`LayerId`], [`LayerState`], [`Bpm`], [`Speed`],
+//!   [`AsciiString`], …) and the [`ManagementHeader`](crate::protocol::ManagementHeader).
+//! * [`session`] — single-actor `SessionTask` with `Peer<…>` lifecycle FSM,
+//!   master-election state machine, `SessionSnapshot` published via
+//!   `ArcSwap`.
+//! * [`proto`] — protocol machines: `ChunkedFrame<T>` reassembly, `TimeSync`
+//!   handshake with spec-page-8 clock-offset computation, `ControlPath` /
+//!   `TextMessage` / `KeyPress` typed builders, `AppSpecificReassembler`,
+//!   `Pending<T>` / `RequestError` request/response.
+//! * [`domain`] — `DomainLayerSnapshot` with `Option`-typed merge fields,
+//!   `TimestampOrdered<T>` writer for out-of-order packet flows.
+//! * [`runtime`] — drift-corrected `Ticker` for the periodic RT cadences
+//!   (20 ms Time, 50 ms Metrics, 1 Hz OptIn / Status / election).
+//! * [`transport`] — `Transport` trait + `UdpTransport` (real network) +
+//!   `MemoryTransport` (in-process loopback for tests) + `BufferPool`.
 //!
-//! * [`protocol`] — wire-format types: every packet payload struct, plus helper
-//!   types ([`LayerId`], [`LayerState`], [`Bpm`], [`Speed`], …).
-//! * [`view`] — read-only consumer view of a discovered foreign node.
+//! ## Behaviour summary
 //!
-//! Most users only need the types re-exported at the crate root.
+//! Every spec-defined runtime behaviour is implemented and runs:
 //!
-//! ### Layered next-generation modules (additive, 0.1.x)
+//! * **Discovery** — OptIn broadcast on port 60000 every 1 s + per-peer
+//!   unicast every 1 s.  OptOut broadcast on shutdown.  Peers timeout after
+//!   10 s of silence.
+//! * **Time** — Master broadcasts on 60001 every 20 ms (spec range 1–40 ms)
+//!   + unicast to each discovered node.
+//! * **Status** — Master broadcasts on 60000 every 1 s + unicast to slaves.
+//! * **Metrics / Meta / Mixer** — unicast to each slave per spec cadences.
+//! * **TimeSync** — 5 s round-robin handshake initiator; inbound step=0
+//!   replies stamped with our current `header.timestamp`; inbound step=1
+//!   resolves the clock offset per spec page 8 formula
+//!   (`Delay = (Current timer − Remote timestamp) / 2`,
+//!   `time_of_remote_now = responder_send_ts + Delay`).  Result readable
+//!   via [`Node::clock_offset_for`](crate::api::Node::clock_offset_for).
+//! * **Master election** — 1 Hz driver builds the candidate set from peers
+//!   announcing `NodeType::{Master, Auto}`; tie-break by uptime descending,
+//!   then announce time ascending, then node id ascending.  Result readable
+//!   via [`Node::election_state`](crate::api::Node::election_state).
+//! * **Request / Response** — Slaves request waveform / beat-grid / cue /
+//!   artwork from `Node<Slave, V3_6>::request_*(addr, layer).await`;
+//!   Masters serve the matching response from a pre-populated cache, or
+//!   reply with `ErrorNotification(014, EMPTY)` per spec.
+//! * **Control / Text / Keyboard / AppSpecific** — wire format parsed +
+//!   typed builders in `proto::`; multi-packet AppSpecific reassembles via
+//!   `proto::AppSpecificReassembler` (validates spec-page-30 packet
+//!   signature `178_260_640`).
 //!
-//! `ARCHITECTURE.md` describes a six-layer rewrite — wire / transport /
-//! session / protocol-machines / domain / runtime — capped with a typed
-//! `api::Node<R, V>` surface.  These modules ship today alongside the
-//! legacy surface; downstream code can adopt them at its own pace.
+//! See [`docs/SPEC_AUDIT_V3_5_1B.md`](../../docs/SPEC_AUDIT_V3_5_1B.md) for the
+//! row-by-row conformance audit.
 //!
-//! * [`spec_version`] — `SpecVersion` + `Flame` + `IncludesFlame<F>`
-//!   relation; `PeerVersion` runtime carrier.
-//! * [`transport`] — `Transport` trait + `Channel` taxonomy +
-//!   `MemoryTransport` (loopback) + `UdpTransport` (real network) +
-//!   `BufferPool`.
-//! * [`session`] — single-actor `SessionTask` with `Peer<…>` state
-//!   machine, election FSM, snapshot publication via `ArcSwap`.
-//! * [`proto`] — protocol machines: `ChunkedFrame<T>`, `TimeSync`,
-//!   `ControlPath`, `TextMessage`, `KeyPress`, `AppSpecificReassembler`,
-//!   `Pending<T>` / `RequestError`.
-//! * [`domain`] — `DomainLayerSnapshot` + `TimestampOrdered<T>` writer.
-//! * [`runtime`] — drift-corrected `Ticker` for the RT hot path.
-//! * [`api`] — typed `Node<R: Role, V: SpecVersion>` + `NodeBuilder`.
+//! ## Status
 //!
-//! ## Implementation status
-//!
-//! This crate covers the parts of TCNet v3.6 needed to observe and impersonate
-//! a Pioneer-style DJ controller on the network. It is **not** a full
-//! reference implementation of every message type defined in the spec.
-//!
-//! **Implemented:**
-//!
-//! * Discovery — `OptIn` broadcasts every second on UDP 60000, listening for
-//!   peer `OptIn` / `OptOut`, 10-second timeout for stale nodes.
-//! * Foreign-node observation — `Status`, `Metrics`, `Meta`, `Mixer` and
-//!   `Time` packets are decoded and merged into [`LayerSnapshot`] /
-//!   [`MixerSnapshot`], published through a triple buffer to
-//!   [`DjControllerView`].
-//! * On-demand requests from a [`DjControllerView`] — `SmallWaveform`,
-//!   `BigWaveform`, `BeatGrid` (with multi-packet reassembly) and
-//!   `LowResArtworkFile`, each with a 5-second timeout.
-//! * Active broadcasting via [`ActiveDJNode`] — periodic `Time` (20 ms),
-//!   `Status` (1 s) and per-layer `Metrics` (50 ms while playing) emission,
-//!   plus on-demand replies to peer `RequestData` packets from a pre-built
-//!   response cache (`SmallWaveform`, `BigWaveform`, `BeatGrid`, `Cue`,
-//!   `Artwork`, `Mixer`, `Metrics`, `Meta`).
-//!
-//! **Partial / not implemented:**
-//!
-//! * **No `OptOut` is emitted** when an `ActiveDJNode` is dropped — peers
-//!   currently rely on the 10-second silence timeout to drop us. Incoming
-//!   `OptOut` from peers *is* handled.
-//! * **`TimeSync`** (message type 10) — struct defined for parsing, but the
-//!   handshake is not performed; this crate relies on local system time and
-//!   the per-packet microsecond timestamp.
-//! * **`ErrorNotification`** (message type 13) — struct defined, never sent
-//!   or surfaced to the user when received.
-//! * **`Control` / `Text` / `Keyboard` / `AppSpecific`** (message types 101 /
-//!   128 / 132 / 30 / 213) — structs defined but neither emitted nor surfaced;
-//!   incoming packets are deserialised and dropped.
-//! * **Authentication** ([`NodeOptions::NEED_AUTHENTICATION`]) — no
-//!   handshake implemented; this crate always operates as an unauthenticated
-//!   peer.
-//! * **`LayerStatus` and `AutoMasterMode`** are placeholder enums with a
-//!   single variant — the spec leaves these mostly unspecified at v3.6.
-//! * **Master-election arbitration** — `NodeType` is reported faithfully but
-//!   the `Auto`/`Master`/`Slave` election logic is not driven by this crate.
-//! * **`MixerData` round-trip** — most fields are surfaced through
-//!   [`MixerSnapshot`], but a handful of less-common send-FX / send-return
-//!   bytes are read from the wire without a dedicated snapshot field.
-//!
-//! PRs welcome.
+//! Production-untested; expect breaking changes between minor versions while
+//! the public API stabilises.  Wire-format conformance is validated against
+//! the spec and against PRO DJ LINK Bridge in a manual smoke-test loop.
 
 use crate::node::dispatcher::{Dispatcher, start_node};
 use crate::node::dj_controller::OutgoingRequest;

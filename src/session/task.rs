@@ -1,17 +1,14 @@
 //! Single-actor session task (ARCHITECTURE.md §4).
 //!
-//! `SessionTask` owns `HashMap<SocketAddrV4, Peer>` and the
-//! `Election` state machine outright.  Mutation only happens by
-//! draining typed [`SessionCommand`]s from a bounded queue; reads
-//! happen via the [`arc_swap::ArcSwap`]-published
-//! [`SessionSnapshot`].  This is what retires the last
-//! `Arc<tokio::sync::RwLock<DynamicNodeState>>` from the legacy
-//! `src/node/dispatcher.rs` — the dispatcher gets demolished in
-//! phase 4.6 once the task is wired into it.
+//! `SessionTask` owns `HashMap<SocketAddrV4, Peer>` and the `Election`
+//! state machine outright.  Mutation happens only by draining typed
+//! [`SessionCommand`]s from a bounded queue; reads happen via the
+//! [`arc_swap::ArcSwap`]-published [`SessionSnapshot`].
 //!
-//! Threading model: the task runs as a tokio task today; phase 7
-//! moves it onto a dedicated `std::thread` with `clock_nanosleep`
-//! ticking.  The trait-shape is unchanged either way.
+//! Threading model: the task runs as a tokio task; future work may
+//! move it onto a dedicated `std::thread` with `clock_nanosleep`
+//! ticking for deterministic RT latency.  The command-channel
+//! interface is the same either way.
 
 use super::command::SessionCommand;
 use super::election::{Election, ElectionCandidate, ElectionState};

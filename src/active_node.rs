@@ -1,4 +1,11 @@
-//! Active broadcaster role: present this process as a TCNet DJ controller node.
+//! Active broadcaster role — internal broadcaster handle that
+//! [`Node<Master, V>`](crate::api::Node) derefs to.
+//!
+//! Owns per-layer + mixer state via per-field `ArcSwap`, drives the
+//! periodic Time / Status / Metrics / Meta / Mixer emission loop,
+//! serves request/response from a pre-populated response cache.
+//! Surfaced through `Node<Master>` so callers see one typed handle;
+//! see [`crate::api`] for the public API.
 
 use crate::node::dj_controller::{ChannelSnapshot, LayerSnapshot, MixerSnapshot};
 use crate::node::response_data::SharedResponseData;

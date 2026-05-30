@@ -1,14 +1,15 @@
 //! Wire-format types for the TCNet UDP protocol.
 //!
 //! Every struct in this module serialises and deserialises via [`deku`] and
-//! mirrors a packet layout described in the TCNet specification:
-//! <https://www.tc-supply.com/_files/ugd/b1c714_0b351a4099c14e738f0cd7fcea623265.pdf>
+//! mirrors a packet layout described in the TCNet V3.5.1B specification
+//! (vendored under `docs/spec/`).
 //!
-//! Library users normally don't construct these types directly — they're built
-//! and consumed inside [`TCNetClient`](crate::TCNetClient),
-//! [`ActiveDJNode`](crate::ActiveDJNode) and [`DjControllerView`](crate::DjControllerView).
-//! They're public so that observers can match on raw packet contents and so
-//! that the message-type catalogue is part of the documented API surface.
+//! These types are constructed and consumed inside the crate's transport /
+//! session / proto layers; downstream callers see them surfaced through
+//! [`Node`](crate::api::Node) accessors (`layers_for`, `mixer_for`,
+//! `request_*`, etc.).  They're public so observers can match on raw
+//! packet contents and so the message-type catalogue is part of the
+//! documented API surface.
 //!
 //! # Message-type catalogue
 //!
@@ -24,19 +25,20 @@
 //! | 10           | —           | unicast          | [`TimeSyncData`]              |
 //! | 13           | —           | unicast          | [`ErrorNotificationData`]     |
 //! | 20           | —           | unicast          | [`RequestData`]               |
-//! | 30 / 213     | —           | unicast / bcast  | [`AppSpecificData`]           |
+//! | 30           | —           | broadcast (60001) / unicast | [`AppSpecificData`] |
 //! | 101          | —           | unicast          | [`ControlData`]               |
-//! | 128          | —           | unicast          | [`TextData`]                  |
-//! | 132          | —           | unicast          | [`KeyboardData`]              |
+//! | 128          | —           | broadcast (60000) / unicast | [`TextData`]       |
+//! | 132          | —           | broadcast (60000) / unicast | [`KeyboardData`]   |
 //! | 200          | 2           | unicast          | [`MetricsData`]               |
 //! | 200          | 4           | unicast          | [`MetaData`]                  |
 //! | 200          | 8           | unicast          | [`BeatGridHeader`] + [`BeatGridEntry`] |
 //! | 200          | 12          | unicast          | [`CueData`] + [`CueEntry`]    |
 //! | 200          | 16          | unicast          | [`SmallWaveformData`]         |
 //! | 200          | 32          | unicast          | [`BigWaveformData`]           |
-//! | 200          | 128         | unicast          | [`ArtworkFileData`]           |
+//! | 204          | 128         | unicast          | [`ArtworkFileData`]           |
 //! | 200          | 150         | unicast          | [`MixerData`] + [`MixerChannel`] |
-//! | 254          | —           | broadcast (60001) | [`TimePacketData`] + [`LayerTimecode`] |
+//! | 213          | —           | broadcast (60000) / unicast | [`AppSpecificData`] |
+//! | 254          | —           | broadcast (60001) / unicast | [`TimePacketData`] + [`LayerTimecode`] |
 
 use bitflags::bitflags;
 use deku::ctx::Order;

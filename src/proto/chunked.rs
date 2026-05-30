@@ -6,10 +6,9 @@
 //! The receiver buffers each chunk by `packet_no`, and once every
 //! chunk has arrived flattens them into the assembled payload.
 //!
-//! The legacy `src/node/dj_controller.rs` has three identical
-//! accumulator structs hand-coded for Beat Grid / Big Waveform /
-//! Artwork.  This generic replaces all three (and is the home for
-//! the AppSpecific accumulator in 5.5).
+//! Used by every multi-packet TCNet response (Beat Grid, Big Waveform,
+//! Artwork File, AppSpecific 30+213) so reassembly is one well-tested
+//! state machine.
 //!
 //! ## Example
 //!

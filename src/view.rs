@@ -1,9 +1,13 @@
-//! Read-only consumer view of a foreign TCNet DJ controller node.
+//! Per-peer read view of a foreign TCNet DJ controller.
 //!
-//! Obtain a [`DjControllerView`] via
-//! [`TCNetClient::get_controller_view`](crate::TCNetClient::get_controller_view).
-//! Reads are lock-free (backed by a triple buffer); on-demand requests for
-//! waveform / beat-grid / artwork data are async and time out after 5 seconds.
+//! Returned by [`Node::layers_for`](crate::api::Node::layers_for) /
+//! [`Node::mixer_for`](crate::api::Node::mixer_for) under the hood;
+//! also surfaced via [`Node::waveform_requester_for`](crate::api::Node::waveform_requester_for)
+//! when callers need a `'static` request handle for background tasks.
+//!
+//! Reads are wait-free via `Arc<ArcSwap<DjControllerState>>`; on-demand
+//! requests for waveform / beat-grid / artwork data are async and time
+//! out after 5 s.
 
 use crate::node::dj_controller::{
     DjControllerState, LayerSnapshot, MixerSnapshot, TimeoutError, UserRequest,
@@ -104,8 +108,8 @@ pub struct DjControllerView {
     state: Arc<ArcSwap<DjControllerState>>,
     /// Cached `load_full()` from the latest accessor call so we can
     /// hand out `&LayerSnapshot` / `&MixerSnapshot` with a stable
-    /// lifetime tied to `&mut self` (mirrors the legacy
-    /// triple-buffer semantics).
+    /// lifetime tied to `&mut self`.  Refreshed on every accessor
+    /// call via [`Self::refresh`].
     cached: Arc<DjControllerState>,
     request_tx: kanal::Sender<UserRequest>,
 }
