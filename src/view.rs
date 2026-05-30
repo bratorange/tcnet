@@ -11,6 +11,8 @@ use crate::node::dj_controller::{
 use crate::protocol::{
     ArtworkFileData, BeatGridHeader, BigWaveformData, CueData, LayerId, SmallWaveformData,
 };
+use arc_swap::ArcSwap;
+use std::sync::Arc;
 use tokio::sync::oneshot;
 
 /// Send-clonable handle for issuing waveform / beat-grid / artwork requests
@@ -99,26 +101,52 @@ impl WaveformRequester {
 /// [`RequestData`](crate::protocol::RequestData) over the wire and wait for
 /// the reply; each times out after 5 s with [`TimeoutError`].
 pub struct DjControllerView {
-    buf: triple_buffer::Output<DjControllerState>,
+    state: Arc<ArcSwap<DjControllerState>>,
+    /// Cached `load_full()` from the latest accessor call so we can
+    /// hand out `&LayerSnapshot` / `&MixerSnapshot` with a stable
+    /// lifetime tied to `&mut self` (mirrors the legacy
+    /// triple-buffer semantics).
+    cached: Arc<DjControllerState>,
     request_tx: kanal::Sender<UserRequest>,
+}
+
+impl Clone for DjControllerView {
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+            cached: self.cached.clone(),
+            request_tx: self.request_tx.clone(),
+        }
+    }
 }
 
 impl DjControllerView {
     pub(crate) fn new(
-        buf: triple_buffer::Output<DjControllerState>,
+        state: Arc<ArcSwap<DjControllerState>>,
         request_tx: kanal::Sender<UserRequest>,
     ) -> Self {
-        Self { buf, request_tx }
+        let cached = state.load_full();
+        Self {
+            state,
+            cached,
+            request_tx,
+        }
+    }
+
+    fn refresh(&mut self) {
+        self.cached = self.state.load_full();
     }
 
     /// Latest snapshot of the eight layer states, in [`LayerId::ALL`] order.
     pub fn get_layers(&mut self) -> &[LayerSnapshot] {
-        self.buf.read().layers.as_slice()
+        self.refresh();
+        self.cached.layers.as_slice()
     }
 
     /// Latest mixer snapshot.
     pub fn get_mixer(&mut self) -> &MixerSnapshot {
-        &self.buf.read().mixer
+        self.refresh();
+        &self.cached.mixer
     }
 
     /// Request the small (2400-byte) waveform for `layer`. Times out after 5 s.

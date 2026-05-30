@@ -24,7 +24,8 @@ use super::roles::{Master, Role, Slave};
 use crate::node::dj_controller::{LayerSnapshot, MixerSnapshot, TimeoutError};
 use crate::protocol::{BeatGridHeader, BigWaveformData, CueData, LayerId, NodeId, SmallWaveformData};
 use crate::spec_version::SpecVersion;
-use crate::{ActiveDJNode, ApplicationConfig, ForeignNodeInfo, TCNetClient};
+use crate::{ActiveDJNode, ApplicationConfig, DjControllerView, ForeignNodeInfo, TCNetClient, WaveformRequester};
+use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::net::SocketAddrV4;
 
@@ -118,6 +119,13 @@ impl From<TimeoutError> for NodeError {
 pub struct Node<R: Role, V: SpecVersion> {
     client: TCNetClient,
     active: Option<ActiveDJNode>,
+    /// Cache of per-peer `DjControllerView`s. The underlying triple
+    /// buffer for each peer is consumable exactly once
+    /// ([`TCNetClient::get_controller_view`] semantics), so we claim
+    /// it on first access for each peer and keep it around for the
+    /// lifetime of the `Node` — making `layers_for` / `mixer_for` /
+    /// `request_*` idempotent across calls on the same address.
+    views: HashMap<SocketAddrV4, DjControllerView>,
     _r: PhantomData<R>,
     _v: PhantomData<V>,
 }
@@ -149,48 +157,62 @@ impl<R: Role, V: SpecVersion> Node<R, V> {
     pub fn config(&self) -> ApplicationConfig {
         self.client.node_config()
     }
+
+    /// Escape hatch: handle to the internal tokio runtime so callers
+    /// can spawn supplementary async work (e.g. background waveform /
+    /// cue pulls) without standing up a second runtime.  Mirrors
+    /// [`TCNetClient::runtime_handle`](crate::TCNetClient::runtime_handle).
+    pub fn runtime_handle(&self) -> tokio::runtime::Handle {
+        self.client.runtime_handle()
+    }
 }
 
 // Slave-specific read methods.
 impl<V: SpecVersion> Node<Slave, V> {
+    /// Lazily claim (and cache) the [`DjControllerView`] for `addr`.
+    /// Returns `None` if no DJ-controller-bearing peer is registered
+    /// at that address yet.
+    fn view_for_mut(&mut self, addr: SocketAddrV4) -> Option<&mut DjControllerView> {
+        use std::collections::hash_map::Entry;
+        match self.views.entry(addr) {
+            Entry::Occupied(e) => Some(e.into_mut()),
+            Entry::Vacant(e) => {
+                let view = self.client.get_controller_view(addr)?;
+                Some(e.insert(view))
+            }
+        }
+    }
+
     /// All eight [`LayerSnapshot`]s for the foreign DJ controller at
     /// `addr`, or `None` if no controller is associated with that
     /// peer.
     pub fn layers_for(&mut self, addr: SocketAddrV4) -> Option<Vec<LayerSnapshot>> {
-        let mut view = self.client.get_controller_view(addr)?;
+        let view = self.view_for_mut(addr)?;
         Some(view.get_layers().to_vec())
     }
 
     /// [`MixerSnapshot`] for the foreign DJ controller at `addr`.
     pub fn mixer_for(&mut self, addr: SocketAddrV4) -> Option<MixerSnapshot> {
-        let mut view = self.client.get_controller_view(addr)?;
+        let view = self.view_for_mut(addr)?;
         Some(view.get_mixer().clone())
     }
 
-    /// Escape hatch: get a legacy [`DjControllerView`](crate::DjControllerView)
-    /// for `addr`, whose [`WaveformRequester`](crate::WaveformRequester) is
-    /// `Send + 'static` and can be moved into a `tokio::spawn`ed
-    /// background task.
+    /// Escape hatch: a `Send + 'static` [`WaveformRequester`] for
+    /// `addr` that can be moved into a `tokio::spawn`ed background
+    /// task — handy for long-lived pullers that need to outlive a
+    /// borrow of `&mut Node`.
     ///
     /// Prefer [`Node::request_small_waveform`] / `request_big_waveform`
     /// / `request_beat_grid` / `request_cue_data` for inline awaits.
-    /// Use this only when you need a `'static` requester handle that
-    /// outlives a borrow of `&mut Node`.
     ///
-    /// Returns `None` if no controller is associated with `addr`, *or*
-    /// if the view has already been taken for this peer — each peer's
-    /// triple buffer is consumable once, per
-    /// [`TCNetClient::get_controller_view`](crate::TCNetClient::get_controller_view)
-    /// semantics.
+    /// Returns `None` if no controller is associated with `addr` yet.
     ///
     /// Slated for removal in 0.3.0 when `Node::pending_*` futures land
     /// to replace the spawn-into-background pattern with a
     /// `'static`-friendly `Pending<T>`.
-    pub fn legacy_controller_view(
-        &mut self,
-        addr: SocketAddrV4,
-    ) -> Option<crate::DjControllerView> {
-        self.client.get_controller_view(addr)
+    pub fn waveform_requester_for(&mut self, addr: SocketAddrV4) -> Option<WaveformRequester> {
+        let view = self.view_for_mut(addr)?;
+        Some(view.waveform_requester())
     }
 
     /// Request a small (low-res) waveform from `addr` for `layer`.
@@ -200,11 +222,9 @@ impl<V: SpecVersion> Node<Slave, V> {
         addr: SocketAddrV4,
         layer: LayerId,
     ) -> Result<SmallWaveformData, NodeError> {
-        let view = self
-            .client
-            .get_controller_view(addr)
+        let requester = self
+            .waveform_requester_for(addr)
             .ok_or(NodeError::PeerHasNoController { addr })?;
-        let requester = view.waveform_requester();
         requester
             .request_small_waveform(layer)
             .await
@@ -218,11 +238,9 @@ impl<V: SpecVersion> Node<Slave, V> {
         addr: SocketAddrV4,
         layer: LayerId,
     ) -> Result<BigWaveformData, NodeError> {
-        let view = self
-            .client
-            .get_controller_view(addr)
+        let requester = self
+            .waveform_requester_for(addr)
             .ok_or(NodeError::PeerHasNoController { addr })?;
-        let requester = view.waveform_requester();
         requester
             .request_big_waveform(layer)
             .await
@@ -235,11 +253,9 @@ impl<V: SpecVersion> Node<Slave, V> {
         addr: SocketAddrV4,
         layer: LayerId,
     ) -> Result<BeatGridHeader, NodeError> {
-        let view = self
-            .client
-            .get_controller_view(addr)
+        let requester = self
+            .waveform_requester_for(addr)
             .ok_or(NodeError::PeerHasNoController { addr })?;
-        let requester = view.waveform_requester();
         requester
             .request_beat_grid(layer)
             .await
@@ -252,11 +268,9 @@ impl<V: SpecVersion> Node<Slave, V> {
         addr: SocketAddrV4,
         layer: LayerId,
     ) -> Result<CueData, NodeError> {
-        let view = self
-            .client
-            .get_controller_view(addr)
+        let requester = self
+            .waveform_requester_for(addr)
             .ok_or(NodeError::PeerHasNoController { addr })?;
-        let requester = view.waveform_requester();
         requester.request_cue_data(layer).await.map_err(Into::into)
     }
 }
@@ -288,6 +302,7 @@ pub(crate) fn from_engine<R: Role, V: SpecVersion>(
     Node {
         client,
         active,
+        views: HashMap::new(),
         _r: PhantomData,
         _v: PhantomData,
     }

@@ -347,14 +347,12 @@ impl TCNetClient {
     /// can only be claimed once, so the second call returns `None`.
     pub fn get_controller_view(&self, addr: SocketAddrV4) -> Option<DjControllerView> {
         self._runtime.block_on(async {
-            let mut state = self.dispatcher.state.write().await;
-            let ctrl = state
-                .discovered_nodes
-                .get_mut(&addr)?
-                .dj_controller
-                .as_mut()?;
-            let buf = ctrl.buf_output.take()?;
-            Some(DjControllerView::new(buf, ctrl.request_tx.clone()))
+            let state = self.dispatcher.state.read().await;
+            let ctrl = state.discovered_nodes.get(&addr)?.dj_controller.as_ref()?;
+            Some(DjControllerView::new(
+                ctrl.state.clone(),
+                ctrl.request_tx.clone(),
+            ))
         })
     }
 
@@ -363,12 +361,13 @@ impl TCNetClient {
     /// been seen yet.
     pub fn get_any_controller_view(&self) -> Option<DjControllerView> {
         self._runtime.block_on(async {
-            let mut state = self.dispatcher.state.write().await;
-            for node in state.discovered_nodes.values_mut() {
-                if let Some(ctrl) = node.dj_controller.as_mut()
-                    && let Some(buf) = ctrl.buf_output.take()
-                {
-                    return Some(DjControllerView::new(buf, ctrl.request_tx.clone()));
+            let state = self.dispatcher.state.read().await;
+            for node in state.discovered_nodes.values() {
+                if let Some(ctrl) = node.dj_controller.as_ref() {
+                    return Some(DjControllerView::new(
+                        ctrl.state.clone(),
+                        ctrl.request_tx.clone(),
+                    ));
                 }
             }
             None

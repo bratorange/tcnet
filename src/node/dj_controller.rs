@@ -1,4 +1,6 @@
 use crate::node::tcnet_packet::{Data, Packet};
+use arc_swap::ArcSwap;
+use std::sync::Arc;
 use crate::protocol::{
     ArtworkFileData, BeatGridHeader, BigWaveformData, Bpm, CueData, LayerId, LayerState,
     MixerChannel, RequestData, RequestDataType, SmallWaveformData, SmpteMode, Speed,
@@ -275,12 +277,20 @@ pub(crate) struct OutgoingRequest {
 // DjController — held by ForeignNode
 // ---------------------------------------------------------------------------
 
-#[derive(Debug)]
+/// Per-foreign-node controller handle.  All fields are `Clone` so the
+/// containing `ForeignNode` can sit inside an
+/// `Arc<ArcSwap<HashMap<…>>>` without a `Mutex`/`RwLock` to coordinate
+/// take-once buffer ownership (the old design used
+/// `triple_buffer::Output` which was take-once; the new design
+/// publishes via `Arc<ArcSwap<DjControllerState>>` which any number
+/// of readers can `load_full` concurrently).
+#[derive(Debug, Clone)]
 pub(crate) struct DjController {
     pub packet_tx: kanal::Sender<Packet>,
     pub request_tx: kanal::Sender<UserRequest>,
-    /// Moved into DjControllerView on first call to get_controller_view().
-    pub buf_output: Option<triple_buffer::Output<DjControllerState>>,
+    /// Wait-free publication of the merged DJ-controller state.
+    /// The dj-controller task writes; every `DjControllerView` reads.
+    pub state: Arc<ArcSwap<DjControllerState>>,
 }
 
 impl DjController {
@@ -290,14 +300,15 @@ impl DjController {
     ) -> (Self, impl Future<Output = ()>) {
         let (packet_tx, packet_rx) = kanal::bounded::<Packet>(100);
         let (request_tx, request_rx) = kanal::bounded::<UserRequest>(16);
-        let (buf_input, buf_output) = triple_buffer::triple_buffer(&DjControllerState::default());
+        let state = Arc::new(ArcSwap::from_pointee(DjControllerState::default()));
+        let state_bg = state.clone();
 
-        let fut = dj_controller_task(packet_rx, request_rx, outgoing_tx, buf_input, foreign_addr);
+        let fut = dj_controller_task(packet_rx, request_rx, outgoing_tx, state_bg, foreign_addr);
 
         let ctrl = DjController {
             packet_tx,
             request_tx,
-            buf_output: Some(buf_output),
+            state,
         };
         (ctrl, fut)
     }
@@ -382,7 +393,7 @@ async fn dj_controller_task(
     packet_rx: kanal::Receiver<Packet>,
     request_rx: kanal::Receiver<UserRequest>,
     outgoing_tx: kanal::Sender<OutgoingRequest>,
-    mut buf_input: triple_buffer::Input<DjControllerState>,
+    state_pub: Arc<ArcSwap<DjControllerState>>,
     foreign_addr: SocketAddrV4,
 ) {
     let mut layers: HashMap<LayerId, LayerSnapshot> = {
@@ -663,14 +674,14 @@ async fn dj_controller_task(
             apply_packet(packet, &mut layers, &mut mixer);
         }
 
-        // write updated state to triple buffer; order matches LayerId::ALL
-        buf_input.write(DjControllerState {
+        // publish merged state; order matches LayerId::ALL.
+        state_pub.store(Arc::new(DjControllerState {
             layers: LayerId::ALL
                 .iter()
                 .map(|id| layers.get(id).cloned().unwrap_or_default())
                 .collect(),
             mixer: mixer.clone(),
-        });
+        }));
 
         // --- drain user requests ---
         let mut requests = Vec::new();
