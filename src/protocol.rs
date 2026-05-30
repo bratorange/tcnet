@@ -107,6 +107,140 @@ impl std::error::Error for WireError {}
 /// 16-bit identifier carried in every [`ManagementHeader`].
 pub type NodeId = u16;
 
+// ---------------------------------------------------------------------------
+// Domain newtypes
+//
+// Each wraps a primitive with a fallible constructor. They prevent
+// cross-type confusion at construction sites (e.g. "I passed a u32 that
+// meant the wrong thing") and pin the spec-stated value range at the
+// type level.
+//
+// These types are currently additive — existing structs still use raw
+// primitives. The phase-5 body extraction will swap field types over.
+// ---------------------------------------------------------------------------
+
+/// Per-node uptime in seconds, rolling over at 12 h (`0..=43_199`) per
+/// TCNet V3.5.1B page 4.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, serde::Serialize)]
+pub struct Uptime(u16);
+
+impl Uptime {
+    /// Spec page 4: must roll over / reset every 12 h.
+    pub const MAX: u16 = 43_199;
+
+    /// Construct an [`Uptime`] from a raw seconds counter, modulo the
+    /// 43_200-second roll-over.
+    pub fn from_secs_mod(secs: u64) -> Self {
+        Self((secs % 43_200) as u16)
+    }
+
+    /// Construct an [`Uptime`] from a raw u16, enforcing the spec range.
+    pub fn try_new(raw: u16) -> Result<Self, WireError> {
+        if raw > Self::MAX {
+            return Err(WireError::BadValue {
+                at: "Uptime",
+                why: "value > 43_199 (spec page 4: 12-hour roll-over)",
+            });
+        }
+        Ok(Self(raw))
+    }
+
+    pub fn as_u16(self) -> u16 {
+        self.0
+    }
+
+    pub fn as_secs(self) -> u32 {
+        u32::from(self.0)
+    }
+}
+
+/// Zero-based index into the eight-slot layer array (`0..=7`).
+///
+/// Convertible to / from [`LayerId`] (the 1-based wire enum) — both
+/// describe the same slot from different angles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
+pub struct LayerIdx(u8);
+
+impl LayerIdx {
+    /// Spec page 14: layer numbers are 1-based 1..=8; this newtype is the
+    /// 0-based form used for indexing into Rust arrays / slices.
+    pub const MAX: u8 = 7;
+
+    pub fn try_new(raw: u8) -> Result<Self, WireError> {
+        if raw > Self::MAX {
+            return Err(WireError::BadValue {
+                at: "LayerIdx",
+                why: "value > 7 (spec page 14: layer numbers are 1..=8)",
+            });
+        }
+        Ok(Self(raw))
+    }
+
+    pub fn as_u8(self) -> u8 {
+        self.0
+    }
+}
+
+impl From<LayerId> for LayerIdx {
+    fn from(id: LayerId) -> Self {
+        Self(id.index() as u8)
+    }
+}
+
+impl TryFrom<LayerIdx> for LayerId {
+    type Error = WireError;
+    fn try_from(idx: LayerIdx) -> Result<Self, Self::Error> {
+        LayerId::from_packet_id(idx.0 + 1).ok_or(WireError::BadValue {
+            at: "LayerIdx -> LayerId",
+            why: "value out of LayerId range",
+        })
+    }
+}
+
+/// Sequence number byte from [`ManagementHeader`].
+///
+/// The wire-level SEQ byte. Wraps at the `u8` boundary by design.
+/// New values are minted by [`SeqCounter`] — one per local node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, serde::Serialize)]
+pub struct Seq(u8);
+
+impl Seq {
+    pub fn new(raw: u8) -> Self {
+        Self(raw)
+    }
+    pub fn as_u8(self) -> u8 {
+        self.0
+    }
+}
+
+/// Monotonic, wrapping SEQ counter — one owner per local node.
+///
+/// Each `next()` call increments by 1 modulo `u8::MAX + 1`. The single
+/// owner discipline (one counter per local node) is the architectural
+/// invariant from ARCHITECTURE.md §5.2 that prevents the "two SEQ streams
+/// interleaved on the wire" class of bug.
+#[derive(Debug, Default)]
+pub struct SeqCounter(std::sync::atomic::AtomicU8);
+
+impl SeqCounter {
+    pub const fn new() -> Self {
+        Self(std::sync::atomic::AtomicU8::new(0))
+    }
+
+    /// Atomically fetch the next SEQ value, advancing the counter.
+    pub fn next(&self) -> Seq {
+        let raw = self
+            .0
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Seq(raw)
+    }
+
+    /// Read the counter without advancing.
+    pub fn peek(&self) -> Seq {
+        Seq(self.0.load(std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
 bitflags! {
     /// Capability / behaviour bitflags reported by every node in its
     /// [`ManagementHeader`].
@@ -220,9 +354,36 @@ pub enum AutoMasterMode {
 /// Unused tail bytes are conventionally left as zero. The
 /// [`std::fmt::Display`] impl renders the bytes as a UTF-8 string (assuming
 /// the field is well-formed ASCII per spec). Build one from a string literal
-/// with the [`into_ascii!`](crate::into_ascii) macro.
+/// with the [`into_ascii!`](crate::into_ascii) macro, or from a runtime byte
+/// buffer with [`AsciiString::try_new`] which validates the ASCII
+/// invariant.
 #[derive(PartialEq, Clone, Copy, DekuRead, DekuWrite)]
 pub struct AsciiString<const N: usize>(pub [u8; N]);
+
+impl<const N: usize> AsciiString<N> {
+    /// Construct an [`AsciiString<N>`] from raw bytes, validating that every
+    /// non-zero byte is in the printable ASCII range `0x20..=0x7E`. (Zero
+    /// bytes are conventional padding and allowed anywhere.)
+    pub fn try_new(bytes: [u8; N]) -> Result<Self, WireError> {
+        for b in bytes.iter() {
+            if *b != 0 && !(0x20..=0x7E).contains(b) {
+                return Err(WireError::InvalidEncoding { at: "AsciiString" });
+            }
+        }
+        Ok(Self(bytes))
+    }
+
+    /// Trim trailing zero-padding and return the bytes as a `&str` (assuming
+    /// the value was constructed through a validating ctor — for raw-byte
+    /// access use `self.0`).
+    pub fn as_str(&self) -> &str {
+        let end = self.0.iter().position(|b| *b == 0).unwrap_or(N);
+        // The validating ctor guarantees printable ASCII < 0x7F; that's also
+        // valid UTF-8. Raw `AsciiString` instances built from struct literals
+        // may not satisfy the invariant — `as_str` is best-effort.
+        std::str::from_utf8(&self.0[..end]).unwrap_or("")
+    }
+}
 
 /// Build an [`AsciiString<N>`] from a string literal at compile time.
 ///
@@ -1402,5 +1563,87 @@ mod wire_type_tests {
             why: "value must be > 0",
         };
         assert!(format!("{}", e).contains("Bpm"));
+    }
+
+    #[test]
+    fn uptime_try_new_enforces_12h_roll_over() {
+        assert_eq!(Uptime::try_new(0).unwrap().as_u16(), 0);
+        assert_eq!(Uptime::try_new(43_199).unwrap().as_u16(), 43_199);
+        assert!(matches!(
+            Uptime::try_new(43_200),
+            Err(WireError::BadValue { at: "Uptime", .. })
+        ));
+        assert!(matches!(
+            Uptime::try_new(u16::MAX),
+            Err(WireError::BadValue { at: "Uptime", .. })
+        ));
+    }
+
+    #[test]
+    fn uptime_from_secs_mod_wraps_at_43200() {
+        assert_eq!(Uptime::from_secs_mod(0).as_u16(), 0);
+        assert_eq!(Uptime::from_secs_mod(43_199).as_u16(), 43_199);
+        assert_eq!(Uptime::from_secs_mod(43_200).as_u16(), 0);
+        assert_eq!(Uptime::from_secs_mod(43_201).as_u16(), 1);
+        assert_eq!(Uptime::from_secs_mod(86_400).as_u16(), 0); // exactly 24h
+    }
+
+    #[test]
+    fn layer_idx_round_trips_through_layer_id() {
+        for id in LayerId::ALL.iter().copied() {
+            let idx = LayerIdx::from(id);
+            assert_eq!(LayerId::try_from(idx).unwrap(), id);
+        }
+    }
+
+    #[test]
+    fn layer_idx_try_new_rejects_oor() {
+        assert_eq!(LayerIdx::try_new(0).unwrap().as_u8(), 0);
+        assert_eq!(LayerIdx::try_new(7).unwrap().as_u8(), 7);
+        assert!(matches!(
+            LayerIdx::try_new(8),
+            Err(WireError::BadValue { at: "LayerIdx", .. })
+        ));
+    }
+
+    #[test]
+    fn seq_counter_increments_with_wrap() {
+        let c = SeqCounter::new();
+        assert_eq!(c.peek().as_u8(), 0);
+        assert_eq!(c.next().as_u8(), 0);
+        assert_eq!(c.next().as_u8(), 1);
+        for _ in 0..253 {
+            c.next();
+        }
+        assert_eq!(c.next().as_u8(), 255);
+        assert_eq!(c.next().as_u8(), 0); // wrapped
+    }
+
+    #[test]
+    fn ascii_string_try_new_validates_printable_ascii() {
+        // valid printable
+        assert!(AsciiString::<8>::try_new(*b"Pioneer_").is_ok());
+        // padded with zeros — allowed
+        assert!(AsciiString::<8>::try_new([b'A', 0, 0, 0, 0, 0, 0, 0]).is_ok());
+        // empty (all zero) — allowed
+        assert!(AsciiString::<8>::try_new([0u8; 8]).is_ok());
+        // 0x7F (DEL) — outside printable range
+        assert!(matches!(
+            AsciiString::<8>::try_new([0x7F, 0, 0, 0, 0, 0, 0, 0]),
+            Err(WireError::InvalidEncoding { .. })
+        ));
+        // 0x1F (US, control) — below printable
+        assert!(matches!(
+            AsciiString::<8>::try_new([0x1F, 0, 0, 0, 0, 0, 0, 0]),
+            Err(WireError::InvalidEncoding { .. })
+        ));
+    }
+
+    #[test]
+    fn ascii_string_as_str_trims_zero_padding() {
+        let s = AsciiString::<8>::try_new(*b"AB______").unwrap();
+        assert_eq!(s.as_str(), "AB______");
+        let s = AsciiString::<8>::try_new([b'A', b'B', 0, 0, 0, 0, 0, 0]).unwrap();
+        assert_eq!(s.as_str(), "AB");
     }
 }
