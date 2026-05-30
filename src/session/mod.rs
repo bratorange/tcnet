@@ -19,9 +19,15 @@
 //! * [`task`] — the actor itself (phase 4.3).
 
 pub mod auth;
+pub mod command;
 pub mod election;
 pub mod peer;
+pub mod snapshot;
+pub mod task;
 
 pub use auth::PeerAuth;
+pub use command::SessionCommand;
 pub use election::{Election, ElectionCandidate, ElectionState, ElectionWinner};
 pub use peer::{LeaveReason, PEER_TIMEOUT, Peer, PeerActive, PeerAnnouncing, PeerLeaving};
+pub use snapshot::{PeerStateKind, PeerSummary, SessionSnapshot};
+pub use task::{DEFAULT_QUEUE_CAPACITY, SessionHandle, SessionTask};
