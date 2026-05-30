@@ -38,6 +38,7 @@ kanal = "0.1.1"
 triple_buffer = "9.0.0"
 serde = { version = "1", features = ["derive"] }
 arc-swap = "1.9.1"
+crossbeam-queue = "0.3.12"
 
 [dev-dependencies]
 serial_test = "3"

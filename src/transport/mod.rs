@@ -22,9 +22,11 @@
 
 pub mod channel;
 pub mod error;
+pub mod pool;
 
 pub use channel::{Channel, ChannelConfig, ChannelStatus, OverflowPolicy};
 pub use error::TransportError;
+pub use pool::{BufferPool, PoolBuf, SLOT_SIZE};
 
 use std::net::SocketAddrV4;
 
