@@ -6,12 +6,12 @@ use crate::node::tcnet_packet::Data::{OptIn, OptOut};
 use crate::node::tcnet_packet::{
     Packet, config_from_header, management_header, node_config_from_opt_in, opt_in_packet,
 };
-use crate::node::{ApplicationConfig, DynamicNodeState, ForeignNode};
+use crate::node::{ApplicationConfig, ForeignNode};
 use crate::protocol::{LayerId, NodeType, RequestDataType};
 use deku::DekuContainerWrite;
 use getifs::best_local_ipv4_addrs;
 use log::{error, info, trace, warn};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use arc_swap::ArcSwap;
@@ -20,8 +20,13 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::UdpSocket;
 use tokio::spawn;
-use tokio::sync::RwLock;
 use tokio::time::interval;
+
+/// Lock-free peer map.  Inserts / removes clone the inner `HashMap`
+/// (RCU); per-entry mutations go through `Arc<ForeignNode>`'s
+/// interior mutability (atomics + ArcSwap fields).  No `Mutex` or
+/// `RwLock` anywhere.
+pub(crate) type PeerMap = ArcSwap<HashMap<SocketAddrV4, Arc<ForeignNode>>>;
 
 pub struct Dispatcher {
     pub(crate) node_config: ApplicationConfig,
@@ -35,10 +40,11 @@ pub struct Dispatcher {
     /// page 4. Owned by `timeout_foreign_nodes` (1 Hz tick), read by
     /// `opt_in_packet`.
     pub(crate) uptime: AtomicU16,
-    /// Discovered foreign peers. Reads & writes still serialise through a
-    /// tokio RwLock; lifting this to a single-actor session task is the
-    /// next architectural step (ARCHITECTURE.md §5.1).
-    pub(crate) state: Arc<RwLock<DynamicNodeState>>,
+    /// Discovered foreign peers.  Lock-free `ArcSwap<HashMap<…>>` —
+    /// insert / remove RCU-clone the inner map; per-entry field
+    /// mutations go through `ForeignNode`'s interior mutability.
+    /// No `Mutex` / `RwLock`.
+    pub(crate) state: Arc<PeerMap>,
     pub(crate) outgoing_tx: kanal::Sender<OutgoingRequest>,
     pub(crate) outgoing_rx: kanal::Receiver<OutgoingRequest>,
     /// Published list of discovered foreign nodes. Single writer (the
@@ -144,13 +150,13 @@ fn is_dj_packet(data: &Data) -> bool {
 }
 
 fn publish_nodes_snapshot(
-    state: &DynamicNodeState,
+    state: &Arc<PeerMap>,
     nodes_snapshot: &Arc<ArcSwap<Vec<ForeignNodeInfo>>>,
 ) {
-    let snapshot: Vec<ForeignNodeInfo> = state
-        .discovered_nodes
+    let map = state.load_full();
+    let snapshot: Vec<ForeignNodeInfo> = map
         .values()
-        .map(ForeignNodeInfo::from)
+        .map(|fn_arc| ForeignNodeInfo::from(fn_arc.as_ref()))
         .collect();
     nodes_snapshot.store(Arc::new(snapshot));
 }
@@ -176,52 +182,59 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
                             OptIn(opt_in_data) => {
                                 let node_config =
                                     node_config_from_opt_in(src_ip, &packet.header, opt_in_data);
-                                let mut state = dispatcher.state.write().await;
-                                let node =
-                                    state
-                                        .discovered_nodes
-                                        .entry(src_addr)
-                                        .or_insert(ForeignNode {
-                                            last_seen: 0,
-                                            address: node_config.address,
-                                            config: node_config,
-                                            dj_controller: None,
-                                        });
-                                node.last_seen = timestamp_secs();
-                                // Update address/config on each OptIn in case port changed.
-                                node.address = node_config.address;
-                                node.config = node_config;
-                                publish_nodes_snapshot(&state, &dispatcher.nodes_snapshot);
+                                let map = dispatcher.state.load_full();
+                                if let Some(node) = map.get(&src_addr) {
+                                    node.touch(timestamp_secs());
+                                    node.set_address(node_config.address);
+                                    node.set_config(node_config);
+                                } else {
+                                    let mut new_map = (*map).clone();
+                                    new_map.insert(
+                                        src_addr,
+                                        Arc::new(ForeignNode::new(
+                                            node_config.address,
+                                            node_config,
+                                            timestamp_secs(),
+                                        )),
+                                    );
+                                    dispatcher.state.store(Arc::new(new_map));
+                                }
+                                publish_nodes_snapshot(
+                                    &dispatcher.state,
+                                    &dispatcher.nodes_snapshot,
+                                );
                             }
 
                             OptOut(_) => {
-                                let mut state = dispatcher.state.write().await;
-                                let removed = state.discovered_nodes.remove(&src_addr);
-                                if removed.is_none() {
+                                let map = dispatcher.state.load_full();
+                                if map.contains_key(&src_addr) {
+                                    let mut new_map = (*map).clone();
+                                    new_map.remove(&src_addr);
+                                    dispatcher.state.store(Arc::new(new_map));
+                                    info!("Node {} has opted out of the network", src_ip);
+                                } else {
                                     warn!(
                                         "Node {} has opted out despite not being part of the network (anymore)",
                                         src_ip
                                     );
-                                } else {
-                                    info!("Node {} has opted out of the network", src_ip);
                                 }
-                                publish_nodes_snapshot(&state, &dispatcher.nodes_snapshot);
+                                publish_nodes_snapshot(
+                                    &dispatcher.state,
+                                    &dispatcher.nodes_snapshot,
+                                );
                             }
 
                             Data::Request(req) => {
                                 let (dest, packets) = {
-                                    let state = dispatcher.state.read().await;
-                                    let dest = state
-                                        .discovered_nodes
+                                    let map = dispatcher.state.load_full();
+                                    let dest = map
                                         .get(&src_addr)
                                         .or_else(|| {
-                                            state
-                                                .discovered_nodes
-                                                .iter()
+                                            map.iter()
                                                 .find(|(k, _)| *k.ip() == src_ip)
                                                 .map(|(_, v)| v)
                                         })
-                                        .map(|n| n.address)
+                                        .map(|n| n.address())
                                         .unwrap_or(SocketAddrV4::new(src_ip, 65_023));
                                     let packets = build_request_response(
                                         req.data_type,
@@ -263,66 +276,68 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
                         }
 
                         if is_dj_packet(&packet.data) {
-                            let mut state = dispatcher.state.write().await;
                             let mut created_new_ctrl = false;
                             // Two-pass routing: prefer exact src_addr match, then any
-                            // entry sharing src_ip. This routes waveform responses
-                            // (source port 65023) and Time broadcasts (source port
-                            // 60001) to the single DjController registered via OptIn
-                            // (source port 60000), preventing spurious duplicate entries.
-                            let key = if state.discovered_nodes.contains_key(&src_addr) {
+                            // entry sharing src_ip.  Routes waveform responses
+                            // (src port 65023) and Time broadcasts (src port 60001)
+                            // to the single DjController registered via OptIn (src
+                            // port 60000), preventing duplicate entries.
+                            let map = dispatcher.state.load_full();
+                            let key = if map.contains_key(&src_addr) {
                                 src_addr
-                            } else if let Some(&k) =
-                                state.discovered_nodes.keys().find(|k| *k.ip() == src_ip)
-                            {
+                            } else if let Some(&k) = map.keys().find(|k| *k.ip() == src_ip) {
                                 k
                             } else {
                                 src_addr
                             };
-                            let node_addr = state
-                                .discovered_nodes
+                            let node_addr = map
                                 .get(&key)
-                                .map(|n| n.address)
+                                .map(|n| n.address())
                                 .unwrap_or(SocketAddrV4::new(src_ip, 65_023));
-                            // When a DJ packet arrives before its OptIn we still
-                            // need to publish a useful node_id/name etc — lift
-                            // them from the header instead of ApplicationConfig::default.
+                            // When a DJ packet arrives before its OptIn we still need
+                            // to publish a useful node_id/name etc — lift from the
+                            // header.
                             let header_config = config_from_header(&packet.header, src_ip);
-                            state
-                                .discovered_nodes
-                                .entry(key)
-                                .and_modify(|foreign_node| {
-                                    if foreign_node.dj_controller.is_none() {
-                                        let (ctrl, task_fut) = DjController::new(
-                                            dispatcher.outgoing_tx.clone(),
-                                            foreign_node.address,
-                                        );
-                                        foreign_node.dj_controller = Some(ctrl);
-                                        spawn(task_fut);
-                                        created_new_ctrl = true;
-                                    }
-                                    if let Some(ctrl) = &foreign_node.dj_controller {
-                                        let _ = ctrl.packet_tx.try_send(packet);
-                                    }
-                                    foreign_node.last_seen = timestamp_secs();
-                                })
-                                .or_insert_with(|| {
-                                    let (ctrl, task_fut) = DjController::new(
-                                        dispatcher.outgoing_tx.clone(),
-                                        node_addr,
-                                    );
-                                    created_new_ctrl = true;
+
+                            let existing = map.get(&key).cloned();
+                            let foreign_node = if let Some(fn_arc) = existing {
+                                fn_arc
+                            } else {
+                                // First-sight node (DJ packet before OptIn).  Insert
+                                // a fresh ForeignNode into the RCU map.
+                                let fresh = Arc::new(ForeignNode::new(
+                                    node_addr,
+                                    header_config,
+                                    timestamp_secs(),
+                                ));
+                                let mut new_map = (*map).clone();
+                                new_map.insert(key, fresh.clone());
+                                dispatcher.state.store(Arc::new(new_map));
+                                fresh
+                            };
+
+                            if foreign_node.dj_controller().is_none() {
+                                let (ctrl, task_fut) = DjController::new(
+                                    dispatcher.outgoing_tx.clone(),
+                                    foreign_node.address(),
+                                );
+                                let installed = foreign_node.install_dj_controller(ctrl);
+                                if installed {
                                     spawn(task_fut);
-                                    ForeignNode {
-                                        last_seen: timestamp_secs(),
-                                        address: node_addr,
-                                        config: header_config,
-                                        dj_controller: Some(ctrl),
-                                    }
-                                });
+                                    created_new_ctrl = true;
+                                }
+                            }
+
+                            if let Some(ctrl) = foreign_node.dj_controller() {
+                                let _ = ctrl.packet_tx.try_send(packet);
+                            }
+                            foreign_node.touch(timestamp_secs());
 
                             if created_new_ctrl {
-                                publish_nodes_snapshot(&state, &dispatcher.nodes_snapshot);
+                                publish_nodes_snapshot(
+                                    &dispatcher.state,
+                                    &dispatcher.nodes_snapshot,
+                                );
                             }
                         }
                     }
@@ -432,18 +447,15 @@ async fn broadcast(dispatcher: Arc<Dispatcher>, broadcast_socket: Arc<UdpSocket>
         tick.tick().await;
 
         let packets = {
-            let dispatcher_state = dispatcher.state.read().await;
+            let map = dispatcher.state.load_full();
             let mut config = dispatcher.node_config;
             config
                 .address
                 .set_port(dispatcher.actual_unicast_port.load(Ordering::Relaxed));
 
             // Unicast to each known node's listener port.
-            let unicast_targets: Vec<SocketAddrV4> = dispatcher_state
-                .discovered_nodes
-                .values()
-                .map(|n| n.address)
-                .collect();
+            let unicast_targets: Vec<SocketAddrV4> =
+                map.values().map(|n| n.address()).collect();
             let mut packets: Vec<(SocketAddrV4, Vec<u8>)> = unicast_targets
                 .iter()
                 .map(|addr| {
@@ -479,21 +491,24 @@ async fn timeout_foreign_nodes(node: Arc<Dispatcher>) {
     loop {
         tick.tick().await;
         let secs = timestamp_secs();
-        {
-            let mut state = node.state.write().await;
-            // Spec V3.5.1B page 4: OptIn `uptime` is seconds-since-start and
-            // must roll over every 12 h (= 43_200 s). One increment per
-            // second matches the 1 Hz tick we are already on.
-            let new_uptime = (node.uptime.load(Ordering::Relaxed) + 1) % 43_200;
-            node.uptime.store(new_uptime, Ordering::Relaxed);
-            state.discovered_nodes.retain(|_, foreign_node| {
-                let keep = foreign_node.last_seen + 10 > secs;
-                if !keep {
-                    warn!("Node {} timed out", foreign_node.address);
-                }
-                keep
-            });
-            publish_nodes_snapshot(&state, &node.nodes_snapshot);
+        // Spec V3.5.1B page 4: OptIn `uptime` is seconds-since-start and
+        // must roll over every 12 h (= 43_200 s). One increment per
+        // second matches the 1 Hz tick we are already on.
+        let new_uptime = (node.uptime.load(Ordering::Relaxed) + 1) % 43_200;
+        node.uptime.store(new_uptime, Ordering::Relaxed);
+        let map = node.state.load_full();
+        let mut new_map = (*map).clone();
+        let before = new_map.len();
+        new_map.retain(|_, foreign_node| {
+            let keep = foreign_node.last_seen() + 10 > secs;
+            if !keep {
+                warn!("Node {} timed out", foreign_node.address());
+            }
+            keep
+        });
+        if new_map.len() != before {
+            node.state.store(Arc::new(new_map));
+            publish_nodes_snapshot(&node.state, &node.nodes_snapshot);
         }
     }
 }
@@ -528,15 +543,14 @@ async fn active_broadcast(
     loop {
         // Read node count and addresses once per loop iteration.
         let (node_count, all_addrs, slave_addrs) = {
-            let state = dispatcher.state.read().await;
-            let node_count = (state.discovered_nodes.len() + 1) as u16;
+            let map = dispatcher.state.load_full();
+            let node_count = (map.len() + 1) as u16;
             let all_addrs: Vec<SocketAddrV4> =
-                state.discovered_nodes.values().map(|n| n.address).collect();
-            let slave_addrs: Vec<SocketAddrV4> = state
-                .discovered_nodes
+                map.values().map(|n| n.address()).collect();
+            let slave_addrs: Vec<SocketAddrV4> = map
                 .values()
-                .filter(|n| matches!(n.config.node_type, NodeType::Slave | NodeType::Repeater))
-                .map(|n| n.address)
+                .filter(|n| matches!(n.config().node_type, NodeType::Slave | NodeType::Repeater))
+                .map(|n| n.address())
                 .collect();
             (node_count, all_addrs, slave_addrs)
         };

@@ -360,13 +360,10 @@ fn test_cdj_play_session() {
     // Allow the dj_controller_task to drain packets and write to triple buffer
     sleep(Duration::from_millis(200));
 
-    client._runtime.block_on(async {
-        let state = client.dispatcher.state.write().await;
-        trace!(
-            "The following nodes were discovered {:?}",
-            state.discovered_nodes
-        );
-    });
+    {
+        let map = client.dispatcher.state.load_full();
+        trace!("The following nodes were discovered {:?}", *map);
+    }
     let mut view = client
         .get_any_controller_view()
         .expect("DjControllerView not available — no DJ packets received?");

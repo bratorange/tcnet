@@ -158,13 +158,12 @@ use crate::node::dispatcher::{Dispatcher, start_node};
 use crate::node::dj_controller::OutgoingRequest;
 use crate::node::response_data::{ResponseDataStore, SharedResponseData};
 use crate::node::tcnet_packet::Data;
-use crate::node::{DynamicNodeState, ForeignNode};
+use crate::node::ForeignNode;
 use crate::protocol::NodeId;
 use std::net::SocketAddrV4;
 use std::sync::atomic::AtomicU16;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
-use tokio::sync::RwLock;
 
 pub mod active_node;
 pub mod api;
@@ -223,10 +222,10 @@ pub struct ForeignNodeInfo {
 impl From<&ForeignNode> for ForeignNodeInfo {
     fn from(n: &ForeignNode) -> Self {
         ForeignNodeInfo {
-            address: n.address,
-            last_seen: n.last_seen,
-            node_id: n.config.node_id,
-            has_dj_controller: n.dj_controller.is_some(),
+            address: n.address(),
+            last_seen: n.last_seen(),
+            node_id: n.config().node_id,
+            has_dj_controller: n.has_dj_controller(),
         }
     }
 }
@@ -292,7 +291,9 @@ impl TCNetClient {
             actual_unicast_port: AtomicU16::new(node_config.address.port()),
             current_seq: std::sync::atomic::AtomicU8::new(0),
             uptime: AtomicU16::new(0),
-            state: Arc::new(RwLock::new(DynamicNodeState::default())),
+            state: Arc::new(arc_swap::ArcSwap::from_pointee(
+                std::collections::HashMap::new(),
+            )),
             outgoing_tx,
             outgoing_rx,
             nodes_snapshot: nodes_snapshot.clone(),
@@ -346,32 +347,28 @@ impl TCNetClient {
     /// already been taken for the same node — each node's triple-buffer output
     /// can only be claimed once, so the second call returns `None`.
     pub fn get_controller_view(&self, addr: SocketAddrV4) -> Option<DjControllerView> {
-        self._runtime.block_on(async {
-            let state = self.dispatcher.state.read().await;
-            let ctrl = state.discovered_nodes.get(&addr)?.dj_controller.as_ref()?;
-            Some(DjControllerView::new(
-                ctrl.state.clone(),
-                ctrl.request_tx.clone(),
-            ))
-        })
+        let map = self.dispatcher.state.load_full();
+        let ctrl = map.get(&addr)?.dj_controller()?;
+        Some(DjControllerView::new(
+            ctrl.state.clone(),
+            ctrl.request_tx.clone(),
+        ))
     }
 
     /// Convenience: return a [`DjControllerView`] for the first discovered node
     /// that has a DJ controller attached. Returns `None` if no such node has
     /// been seen yet.
     pub fn get_any_controller_view(&self) -> Option<DjControllerView> {
-        self._runtime.block_on(async {
-            let state = self.dispatcher.state.read().await;
-            for node in state.discovered_nodes.values() {
-                if let Some(ctrl) = node.dj_controller.as_ref() {
-                    return Some(DjControllerView::new(
-                        ctrl.state.clone(),
-                        ctrl.request_tx.clone(),
-                    ));
-                }
+        let map = self.dispatcher.state.load_full();
+        for node in map.values() {
+            if let Some(ctrl) = node.dj_controller() {
+                return Some(DjControllerView::new(
+                    ctrl.state.clone(),
+                    ctrl.request_tx.clone(),
+                ));
             }
-            None
-        })
+        }
+        None
     }
 
     /// Return a handle to the internal tokio runtime.

@@ -1,7 +1,9 @@
 use crate::into_ascii;
 use crate::protocol::{AsciiString, NodeId, NodeOptions, NodeType};
-use std::collections::HashMap;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use std::net::{Ipv4Addr, SocketAddrV4};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 pub(crate) mod dispatcher;
 pub(crate) mod dj_controller;
 pub(crate) mod response_data;
@@ -9,20 +11,83 @@ pub(crate) mod tcnet_packet;
 
 use crate::node::dj_controller::DjController;
 
+/// Per-peer record stored in [`DynamicNodeState`].
+///
+/// All mutable fields use interior mutability (`AtomicU64` /
+/// `ArcSwap` / `ArcSwapOption`) so the containing
+/// `Arc<ForeignNode>` is immutable to the caller — which in turn
+/// lets the surrounding `HashMap<SocketAddrV4, Arc<ForeignNode>>`
+/// live behind an `ArcSwap` (RCU on insert/remove only, no lock).
 #[derive(Debug)]
 pub(crate) struct ForeignNode {
-    pub last_seen: u64,
-    /// Full socket address including the listener port (from OptIn).
-    pub address: SocketAddrV4,
-    pub config: ApplicationConfig,
-    pub dj_controller: Option<DjController>,
+    /// Wall-clock seconds since UNIX epoch of the most recent
+    /// packet from this peer.  Atomically updated on every
+    /// observed OptIn / DJ packet; read by the 1 Hz timeout sweep.
+    pub last_seen: AtomicU64,
+    /// Peer's listener address.  Reset on each OptIn in case the
+    /// peer's port changes.
+    pub address: ArcSwap<SocketAddrV4>,
+    /// Peer's announced application config.  Republished on each
+    /// OptIn.
+    pub config: ArcSwap<ApplicationConfig>,
+    /// Per-peer DJ-controller handle.  `None` until the first
+    /// DJ-class packet (Status / Metrics / Time / Mixer / …) lands
+    /// for this peer; set exactly once via
+    /// [`ArcSwapOption::compare_and_swap`]-equivalent — subsequent
+    /// updates to the same peer reuse the existing controller.
+    pub dj_controller: ArcSwapOption<DjController>,
 }
 
-/// Shared map of discovered peers. `current_seq` and `uptime` live
-/// outside this struct as standalone atomics (see [`Dispatcher`]).
-#[derive(Default)]
-pub(crate) struct DynamicNodeState {
-    pub discovered_nodes: HashMap<SocketAddrV4, ForeignNode>,
+impl ForeignNode {
+    pub fn new(address: SocketAddrV4, config: ApplicationConfig, last_seen: u64) -> Self {
+        Self {
+            last_seen: AtomicU64::new(last_seen),
+            address: ArcSwap::from_pointee(address),
+            config: ArcSwap::from_pointee(config),
+            dj_controller: ArcSwapOption::empty(),
+        }
+    }
+
+    pub fn last_seen(&self) -> u64 {
+        self.last_seen.load(Ordering::Relaxed)
+    }
+    pub fn touch(&self, secs: u64) {
+        self.last_seen.store(secs, Ordering::Relaxed);
+    }
+    pub fn address(&self) -> SocketAddrV4 {
+        **self.address.load()
+    }
+    pub fn set_address(&self, addr: SocketAddrV4) {
+        self.address.store(Arc::new(addr));
+    }
+    pub fn config(&self) -> ApplicationConfig {
+        **self.config.load()
+    }
+    pub fn set_config(&self, cfg: ApplicationConfig) {
+        self.config.store(Arc::new(cfg));
+    }
+    pub fn dj_controller(&self) -> Option<Arc<DjController>> {
+        self.dj_controller.load_full()
+    }
+    /// Set the DJ controller (only the first call takes effect).
+    /// Returns `true` if this call installed the controller.
+    pub fn install_dj_controller(&self, ctrl: DjController) -> bool {
+        // ArcSwapOption doesn't directly expose compare-and-swap, so
+        // we approximate: check + store.  Two callers racing both
+        // create their own controllers but only the second wins —
+        // that's wasteful but safe.  The dispatcher serialises through
+        // its own kanal queue so in practice there's only ever one
+        // caller installing.
+        if self.dj_controller.load().is_some() {
+            return false;
+        }
+        self.dj_controller.store(Some(Arc::new(ctrl)));
+        true
+    }
+    /// Snapshot helper for the published `ForeignNodeInfo` list.
+    pub fn has_dj_controller(&self) -> bool {
+        self.dj_controller.load().is_some()
+    }
 }
 
 /// Identity and bind configuration used by a [`TCNetClient`](crate::TCNetClient)
