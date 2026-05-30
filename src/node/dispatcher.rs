@@ -65,6 +65,105 @@ pub struct Dispatcher {
     /// `best_local_ipv4_addrs`. Single writer / many readers — wait-free
     /// via `ArcSwap` instead of a `Mutex`.
     pub(crate) broadcast_targets: ArcSwap<Vec<SocketAddrV4>>,
+    /// In-flight TimeSync handshakes keyed by peer address.  Populated
+    /// when we send a step=0 initiate; drained when the matching
+    /// step=1 reply arrives.  `dashmap` is the only sync-friendly
+    /// concurrent-map dep in the crate, but the architecture rule is
+    /// "no Mutex/RwLock"; here we use the same `ArcSwap<HashMap<>>`
+    /// pattern as `Dispatcher.state` for both stores.
+    pub(crate) pending_time_sync: PendingTimeSyncStore,
+    /// Most recent clock offset per peer, populated on successful
+    /// TimeSync resolution.
+    pub(crate) clock_offsets: ClockOffsetStore,
+    /// Wait-free published master-election state.
+    pub(crate) election: ElectionStore,
+}
+
+/// Lock-free per-peer map of in-flight TimeSync handshakes.
+#[derive(Default)]
+pub(crate) struct PendingTimeSyncStore {
+    inner: ArcSwap<std::collections::HashMap<SocketAddrV4, crate::proto::PendingTimeSync>>,
+}
+
+impl PendingTimeSyncStore {
+    pub fn new() -> Self {
+        Self {
+            inner: ArcSwap::from_pointee(std::collections::HashMap::new()),
+        }
+    }
+    pub fn insert(&self, addr: SocketAddrV4, p: crate::proto::PendingTimeSync) {
+        let old = self.inner.load_full();
+        let mut new = (*old).clone();
+        new.insert(addr, p);
+        self.inner.store(Arc::new(new));
+    }
+    pub fn remove(&self, addr: &SocketAddrV4) -> Option<crate::proto::PendingTimeSync> {
+        let old = self.inner.load_full();
+        if !old.contains_key(addr) {
+            return None;
+        }
+        let mut new = (*old).clone();
+        let p = new.remove(addr);
+        self.inner.store(Arc::new(new));
+        p
+    }
+    pub fn len(&self) -> usize {
+        self.inner.load_full().len()
+    }
+    /// Drop entries older than `max_age`.  Called by the periodic
+    /// initiator so a peer that goes silent doesn't leak a slot.
+    pub fn sweep_stale(&self, now: std::time::Instant, max_age: std::time::Duration) {
+        let old = self.inner.load_full();
+        let mut new = (*old).clone();
+        let before = new.len();
+        new.retain(|_, p| now.duration_since(p.sent_at) < max_age);
+        if new.len() != before {
+            self.inner.store(Arc::new(new));
+        }
+    }
+}
+
+/// Lock-free per-peer map of last observed clock offset.
+#[derive(Default)]
+pub(crate) struct ClockOffsetStore {
+    inner: ArcSwap<std::collections::HashMap<SocketAddrV4, crate::proto::ClockOffset>>,
+}
+
+impl ClockOffsetStore {
+    pub fn new() -> Self {
+        Self {
+            inner: ArcSwap::from_pointee(std::collections::HashMap::new()),
+        }
+    }
+    pub fn insert(&self, addr: SocketAddrV4, offset: crate::proto::ClockOffset) {
+        let old = self.inner.load_full();
+        let mut new = (*old).clone();
+        new.insert(addr, offset);
+        self.inner.store(Arc::new(new));
+    }
+    pub fn get(&self, addr: &SocketAddrV4) -> Option<crate::proto::ClockOffset> {
+        self.inner.load_full().get(addr).copied()
+    }
+}
+
+/// Wait-free published master-election state.
+#[derive(Default)]
+pub(crate) struct ElectionStore {
+    inner: ArcSwap<crate::session::ElectionState>,
+}
+
+impl ElectionStore {
+    pub fn new() -> Self {
+        Self {
+            inner: ArcSwap::from_pointee(crate::session::ElectionState::default()),
+        }
+    }
+    pub fn store(&self, s: crate::session::ElectionState) {
+        self.inner.store(Arc::new(s));
+    }
+    pub fn load(&self) -> crate::session::ElectionState {
+        **self.inner.load()
+    }
 }
 
 /// Try to bind a UDP socket at `preferred_port`, incrementing until a free port is found.
@@ -131,6 +230,119 @@ pub async fn start_node(dispatcher: Arc<Dispatcher>) {
         broadcast_socket.clone(),
         time_broadcast_socket.clone(),
     ));
+    spawn(time_sync_initiator(dispatcher.clone()));
+    spawn(election_driver(dispatcher.clone()));
+}
+
+/// Re-evaluate the master election every second from the current
+/// peer set.  A peer is a candidate iff its declared `NodeType` is
+/// `Master` or `Auto`.  Tie-break is delegated to
+/// [`crate::session::Election`].
+async fn election_driver(dispatcher: Arc<Dispatcher>) {
+    let mut election = crate::session::Election::new();
+    let mut tick = interval(Duration::from_secs(1));
+    loop {
+        tick.tick().await;
+        let map = dispatcher.state.load_full();
+        let now = std::time::Instant::now();
+        let uptime_secs = dispatcher.uptime.load(Ordering::Relaxed) as u32;
+
+        // Self-candidacy: if we're announcing as Master / Auto we
+        // also enter the election.
+        let mut candidates: Vec<crate::session::ElectionCandidate> = Vec::new();
+        if matches!(
+            dispatcher.node_config.node_type,
+            NodeType::Master | NodeType::Auto
+        ) {
+            candidates.push(crate::session::ElectionCandidate {
+                node_id: dispatcher.node_config.node_id,
+                addr: SocketAddrV4::new(
+                    *dispatcher.bind_address.ip(),
+                    dispatcher
+                        .actual_unicast_port
+                        .load(Ordering::Relaxed),
+                ),
+                uptime_secs,
+                announced_at: now,
+            });
+        }
+
+        for (addr, fn_arc) in map.iter() {
+            let cfg = fn_arc.config();
+            if matches!(cfg.node_type, NodeType::Master | NodeType::Auto) {
+                // Peer uptime isn't carried per-packet in V3.5.1B; we
+                // approximate by "seconds since we first saw it".
+                let last_seen = fn_arc.last_seen();
+                let now_secs = timestamp_secs();
+                let observed = now_secs.saturating_sub(last_seen).min(43_200) as u32;
+                candidates.push(crate::session::ElectionCandidate {
+                    node_id: cfg.node_id,
+                    addr: *addr,
+                    uptime_secs: observed,
+                    announced_at: now,
+                });
+            }
+        }
+
+        let new_state = election.observe(&candidates, now);
+        dispatcher.election.store(new_state);
+    }
+}
+
+/// Periodically initiate a TimeSync(step=0) handshake against one of
+/// the active peers.  Round-robins across the peer set so every peer
+/// gets a fresh clock-offset measurement every `PEER_COUNT * 5 s`.
+async fn time_sync_initiator(dispatcher: Arc<Dispatcher>) {
+    let mut tick = interval(Duration::from_secs(5));
+    let mut round_robin: usize = 0;
+    loop {
+        tick.tick().await;
+
+        // Drop slots older than the 500 ms reply window so we don't
+        // leak entries when a peer goes silent mid-handshake.
+        dispatcher.pending_time_sync.sweep_stale(
+            std::time::Instant::now(),
+            crate::proto::DEFAULT_MAX_REPLY_AGE,
+        );
+
+        // Pick the next peer round-robin.
+        let map = dispatcher.state.load_full();
+        let addrs: Vec<SocketAddrV4> = map.keys().copied().collect();
+        if addrs.is_empty() {
+            continue;
+        }
+        round_robin = (round_robin + 1) % addrs.len();
+        let target = addrs[round_robin];
+
+        let local_ts_us = current_microseconds();
+        let unicast_port = dispatcher.actual_unicast_port.load(Ordering::Relaxed);
+        let initiate =
+            crate::protocol::TimeSyncData::new_initiate(local_ts_us, unicast_port);
+
+        // Stamp the pending slot BEFORE we send so a fast reply
+        // can't beat the insert.
+        let pending = crate::proto::PendingTimeSync {
+            our_send_ts_us: local_ts_us,
+            sent_at: std::time::Instant::now(),
+            peer: target,
+        };
+        dispatcher.pending_time_sync.insert(target, pending);
+
+        let _ = dispatcher.outgoing_tx.try_send(OutgoingRequest {
+            destination: target,
+            data: Data::TimeSync(initiate),
+        });
+    }
+}
+
+fn current_microseconds() -> u32 {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO);
+    // Take the microseconds portion of the current second so the
+    // value fits in u32 and rolls naturally each second — spec page
+    // 4 describes `timestamp` as a within-second µs counter.
+    (now.subsec_micros()) as u32
 }
 
 fn is_dj_packet(data: &Data) -> bool {
@@ -268,6 +480,61 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
                                             destination: dest,
                                             data: pkt,
                                         });
+                                    }
+                                }
+                            }
+
+                            Data::TimeSync(ts) => {
+                                // Spec page 8: step=0 = incoming initiator
+                                // request, reply with step=1 echoing the
+                                // remote_timestamp back.  step=1 = response
+                                // to our outgoing initiate; resolve any
+                                // matching PendingTimeSync.
+                                let unicast_port = dispatcher
+                                    .actual_unicast_port
+                                    .load(Ordering::Relaxed);
+                                let reply_dest = SocketAddrV4::new(
+                                    src_ip,
+                                    ts.node_listener_port(),
+                                );
+                                if ts.step() == 0 {
+                                    let reply = crate::protocol::TimeSyncData::new_response(
+                                        ts.remote_timestamp(),
+                                        unicast_port,
+                                    );
+                                    let _ = dispatcher
+                                        .outgoing_tx
+                                        .try_send(OutgoingRequest {
+                                            destination: reply_dest,
+                                            data: Data::TimeSync(reply),
+                                        });
+                                } else if ts.step() == 1 {
+                                    if let Some(pending) =
+                                        dispatcher.pending_time_sync.remove(&src_addr)
+                                    {
+                                        let reply = crate::proto::TimeSyncReply {
+                                            echoed_our_ts_us: ts.remote_timestamp(),
+                                            their_listener_port: ts.node_listener_port(),
+                                        };
+                                        match pending.accept(reply, std::time::Instant::now()) {
+                                            Ok(offset) => {
+                                                trace!(
+                                                    "TimeSync: peer {} rtt={:?} delay={:?}",
+                                                    src_addr,
+                                                    offset.round_trip,
+                                                    offset.one_way_delay,
+                                                );
+                                                dispatcher
+                                                    .clock_offsets
+                                                    .insert(src_addr, offset);
+                                            }
+                                            Err(e) => {
+                                                trace!(
+                                                    "TimeSync reply from {}: rejected {:?}",
+                                                    src_addr, e,
+                                                );
+                                            }
+                                        }
                                     }
                                 }
                             }

@@ -908,6 +908,42 @@ pub struct TimeSyncData {
     remote_timestamp: u32,       // Timestamp of Remote Node
 }
 
+impl TimeSyncData {
+    /// Build an outgoing `step = 0` TimeSync packet.  `local_ts_us`
+    /// is the local node's microsecond timestamp at send;
+    /// `local_listener_port` is the unicast port we want the
+    /// responder to reply on.
+    pub fn new_initiate(local_ts_us: u32, local_listener_port: u16) -> Self {
+        Self {
+            step: 0,
+            _reserved0: ReservedData::default(),
+            node_listener_port: local_listener_port,
+            remote_timestamp: local_ts_us,
+        }
+    }
+
+    /// Build a `step = 1` reply packet.  `echoed_ts_us` must be the
+    /// `remote_timestamp` value from the inbound `step = 0` packet.
+    pub fn new_response(echoed_ts_us: u32, local_listener_port: u16) -> Self {
+        Self {
+            step: 1,
+            _reserved0: ReservedData::default(),
+            node_listener_port: local_listener_port,
+            remote_timestamp: echoed_ts_us,
+        }
+    }
+
+    pub fn step(&self) -> u8 {
+        self.step
+    }
+    pub fn node_listener_port(&self) -> u16 {
+        self.node_listener_port
+    }
+    pub fn remote_timestamp(&self) -> u32 {
+        self.remote_timestamp
+    }
+}
+
 /// Error / notification packet (message type 13).
 ///
 /// Sent in reply to a malformed or unsatisfiable [`RequestData`].

@@ -302,6 +302,9 @@ impl TCNetClient {
             active_time_rx,
             response_data: response_data.clone(),
             broadcast_targets: arc_swap::ArcSwap::from_pointee(Vec::new()),
+            pending_time_sync: crate::node::dispatcher::PendingTimeSyncStore::new(),
+            clock_offsets: crate::node::dispatcher::ClockOffsetStore::new(),
+            election: crate::node::dispatcher::ElectionStore::new(),
         });
 
         runtime.spawn(start_node(dispatcher.clone()));
@@ -338,6 +341,25 @@ impl TCNetClient {
     /// The [`ApplicationConfig`] this client was constructed with.
     pub fn node_config(&self) -> ApplicationConfig {
         self.dispatcher.node_config
+    }
+
+    /// Most recent successful TimeSync result for `peer`, or `None`
+    /// if no handshake has completed.
+    ///
+    /// The dispatcher periodically initiates TimeSync(step=0) against
+    /// every active peer (~5 s round-robin); replies are matched
+    /// against in-flight pending slots and the resolved
+    /// [`ClockOffset`](crate::proto::ClockOffset) is published here.
+    pub fn clock_offset_for(&self, peer: SocketAddrV4) -> Option<crate::proto::ClockOffset> {
+        self.dispatcher.clock_offsets.get(&peer)
+    }
+
+    /// Current master-election state.  Returns
+    /// [`ElectionState::Watching`](crate::session::ElectionState)
+    /// if no candidates have been observed yet.  The election driver
+    /// re-evaluates once per second from the current peer set.
+    pub fn election_state(&self) -> crate::session::ElectionState {
+        self.dispatcher.election.load()
     }
 
     /// Attach a reader to the foreign DJ controller node at `addr`.

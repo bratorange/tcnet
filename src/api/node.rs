@@ -158,6 +158,21 @@ impl<R: Role, V: SpecVersion> Node<R, V> {
         self.client.node_config()
     }
 
+    /// Most recent successful TimeSync result for `peer`, or `None`.
+    /// See [`crate::proto::ClockOffset`].
+    pub fn clock_offset_for(
+        &self,
+        peer: SocketAddrV4,
+    ) -> Option<crate::proto::ClockOffset> {
+        self.client.clock_offset_for(peer)
+    }
+
+    /// Current master-election state.  See
+    /// [`crate::session::ElectionState`].
+    pub fn election_state(&self) -> crate::session::ElectionState {
+        self.client.election_state()
+    }
+
     /// Escape hatch: handle to the internal tokio runtime so callers
     /// can spawn supplementary async work (e.g. background waveform /
     /// cue pulls) without standing up a second runtime.  Mirrors
