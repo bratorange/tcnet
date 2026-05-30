@@ -286,6 +286,114 @@ pub type Timestamp = u32;
 /// 8-byte ASCII node name (alias for [`AsciiString<8>`]).
 pub type NodeName = AsciiString<8>;
 
+// ---------------------------------------------------------------------------
+// Provenance phantoms (ARCHITECTURE.md §3.4)
+//
+// `WireFrame<P>` tags each in-flight packet with the *provenance* of its
+// bytes. The transport layer (added in phase 3) will refuse to send
+// anything that isn't `<Outgoing>`; the session layer (added in phase 4)
+// owns the only path that turns a `<Building>` into `<Outgoing>` because
+// it owns the SEQ counter and the uptime clock. Echoing an inbound
+// packet, or sending a half-built one, becomes a compile error.
+// ---------------------------------------------------------------------------
+
+mod provenance_sealed {
+    pub trait Sealed {}
+}
+
+/// Marker trait for the provenance of a [`WireFrame`].
+pub trait Provenance: provenance_sealed::Sealed {}
+
+/// Provenance: the frame was parsed from the wire.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Received;
+impl provenance_sealed::Sealed for Received {}
+impl Provenance for Received {}
+
+/// Provenance: the frame is being assembled locally. It does not yet
+/// have a committed SEQ or timestamp.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Building;
+impl provenance_sealed::Sealed for Building {}
+impl Provenance for Building {}
+
+/// Provenance: the frame has been finalised by the session layer
+/// (SEQ + timestamp committed) and is ready to leave the host. Only
+/// `WireFrame<Outgoing>` may be passed to the transport layer.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Outgoing;
+impl provenance_sealed::Sealed for Outgoing {}
+impl Provenance for Outgoing {}
+
+/// Typed wrapper around a parsed-or-being-built TCNet packet.
+///
+/// `WireFrame<Received>` is what the listener produces; consumers can
+/// inspect it but not echo it back to the wire. `WireFrame<Building>` is
+/// what a protocol-layer builder produces; it has no SEQ or timestamp
+/// yet. `WireFrame<Outgoing>` is what the session layer produces after
+/// stamping SEQ + timestamp; only this variant may be sent.
+#[derive(Debug)]
+pub struct WireFrame<P: Provenance> {
+    pub header: ManagementHeader,
+    pub body: crate::node::tcnet_packet::Data,
+    _p: std::marker::PhantomData<P>,
+}
+
+impl<P: Provenance> WireFrame<P> {
+    pub fn header(&self) -> &ManagementHeader {
+        &self.header
+    }
+    pub fn body(&self) -> &crate::node::tcnet_packet::Data {
+        &self.body
+    }
+    pub fn into_parts(self) -> (ManagementHeader, crate::node::tcnet_packet::Data) {
+        (self.header, self.body)
+    }
+}
+
+impl WireFrame<Received> {
+    /// Wrap a header + body that came off the wire. Used by the transport
+    /// recv loop in phase 3+ — kept now so callers can be type-checked
+    /// against `<Received>` from day one.
+    #[allow(dead_code)] // wired up in phase 3
+    pub(crate) fn from_wire(
+        header: ManagementHeader,
+        body: crate::node::tcnet_packet::Data,
+    ) -> Self {
+        Self {
+            header,
+            body,
+            _p: std::marker::PhantomData,
+        }
+    }
+}
+
+impl WireFrame<Building> {
+    /// Start a new outgoing frame. SEQ + timestamp are placeholder zeros
+    /// until [`WireFrame::commit`] runs.
+    pub fn new(header: ManagementHeader, body: crate::node::tcnet_packet::Data) -> Self {
+        Self {
+            header,
+            body,
+            _p: std::marker::PhantomData,
+        }
+    }
+
+    /// Consume the in-progress frame and stamp it with a SEQ + timestamp
+    /// from the local node, yielding a [`WireFrame<Outgoing>`] that may
+    /// be handed to the transport. Borrows a `&SeqCounter` so the borrow
+    /// checker enforces a single SEQ source per local node.
+    pub fn commit(mut self, seq: &SeqCounter, ts: Timestamp) -> WireFrame<Outgoing> {
+        self.header.seq = seq.next().as_u8();
+        self.header.timestamp = ts;
+        WireFrame {
+            header: self.header,
+            body: self.body,
+            _p: std::marker::PhantomData,
+        }
+    }
+}
+
 /// `N` bytes of spec-reserved padding.
 ///
 /// Preserved on the wire (zero-filled on writes), ignored on reads. The
@@ -1645,5 +1753,66 @@ mod wire_type_tests {
         assert_eq!(s.as_str(), "AB______");
         let s = AsciiString::<8>::try_new([b'A', b'B', 0, 0, 0, 0, 0, 0]).unwrap();
         assert_eq!(s.as_str(), "AB");
+    }
+
+    // ----- Provenance phantoms (compile-time invariants) -----
+
+    #[test]
+    fn wire_frame_building_to_outgoing_stamps_seq_and_timestamp() {
+        use crate::node::tcnet_packet::Data;
+
+        let header = ManagementHeader {
+            node_id: 7,
+            protocol_version_major: 3,
+            protocol_version_minor: 6,
+            _header: crate::into_ascii!("TCN"),
+            message_type: 5, // Status
+            node_name: into_ascii!("Test____"),
+            seq: 0,
+            node_type: NodeType::Slave,
+            node_options: NodeOptions::empty(),
+            timestamp: 0,
+        };
+        let body = Data::OptOut(OptOutData {
+            node_count: 1,
+            node_listener_port: 65_023,
+        });
+
+        let building = WireFrame::<Building>::new(header.clone(), body);
+        let counter = SeqCounter::new();
+        let outgoing = building.commit(&counter, 12_345);
+
+        assert_eq!(outgoing.header().seq, 0); // counter starts at 0
+        assert_eq!(outgoing.header().timestamp, 12_345);
+        // Second commit advances counter past 0:
+        let building2 = WireFrame::<Building>::new(header.clone(), Data::OptOut(OptOutData {
+            node_count: 1,
+            node_listener_port: 65_023,
+        }));
+        let outgoing2 = building2.commit(&counter, 12_346);
+        assert_eq!(outgoing2.header().seq, 1);
+    }
+
+    /// Compile-time assertion: `WireFrame<Received>` and
+    /// `WireFrame<Outgoing>` are distinct types, so a caller cannot
+    /// accidentally route an inbound packet to a `send`-shaped sink.
+    /// (The transport layer in phase 3 will take `WireFrame<Outgoing>`
+    /// only.)
+    #[test]
+    fn wire_frame_provenance_is_compile_time_distinct() {
+        fn _accepts_only_outgoing(_: WireFrame<Outgoing>) {}
+        // Calling `_accepts_only_outgoing` with a `WireFrame<Received>`
+        // would not compile — that property is what this phantom buys
+        // us. At runtime there is nothing left to assert; size_of must
+        // match because PhantomData is zero-sized.
+        use std::mem::size_of;
+        assert_eq!(
+            size_of::<WireFrame<Received>>(),
+            size_of::<WireFrame<Outgoing>>()
+        );
+        assert_eq!(
+            size_of::<WireFrame<Building>>(),
+            size_of::<WireFrame<Outgoing>>()
+        );
     }
 }
