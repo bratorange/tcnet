@@ -8,7 +8,8 @@ use crate::protocol::{
     CueEntry, LayerId, LayerState, LayerStatus, LayerTimecode, MetaData, MetricsData, MixerChannel,
     MixerData, ReservedData, SmallWaveformData, SmpteMode, Speed, StatusData, TimePacketData,
 };
-use std::sync::{Arc, Mutex};
+use arc_swap::ArcSwap;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Runtime;
 use tokio::time::interval;
@@ -89,44 +90,90 @@ impl LayerCueState {
 // Internal shared state
 // ---------------------------------------------------------------------------
 
+/// Mutable per-layer / mixer state owned by an [`ActiveDJNode`].
+///
+/// Each layer and the mixer are published independently through
+/// [`ArcSwap`] — readers (the periodic broadcast task, the dispatcher's
+/// request handler, public snapshot accessors) load wait-free; writers
+/// (public mutators, the same broadcast task) use the
+/// `rcu`/`store` pattern to publish a new immutable snapshot atomically.
+/// No `Mutex`, no `RwLock`.
 struct ActiveNodeInner {
-    layers: Vec<LayerSnapshot>,
-    cue_states: Vec<LayerCueState>,
-    mixer: MixerSnapshot,
+    layers: [ArcSwap<LayerSnapshot>; 8],
+    cue_states: [ArcSwap<LayerCueState>; 8],
+    mixer: ArcSwap<MixerSnapshot>,
 }
 
 impl Default for ActiveNodeInner {
     fn default() -> Self {
-        let mut layers: Vec<LayerSnapshot> = LayerId::ALL
-            .iter()
-            .map(|_| LayerSnapshot::default())
-            .collect();
-        for l in &mut layers {
-            l.bpm = Bpm((120.0 * 100.0) as u32);
-            l.speed = Speed::NORMAL;
-        }
-        let cue_states = LayerId::ALL
-            .iter()
-            .map(|_| LayerCueState::default())
-            .collect();
         Self {
-            layers,
-            cue_states,
-            mixer: MixerSnapshot::default(),
+            layers: std::array::from_fn(|_| {
+                let mut snap = LayerSnapshot::default();
+                snap.bpm = Bpm((120.0 * 100.0) as u32);
+                snap.speed = Speed::NORMAL;
+                ArcSwap::from_pointee(snap)
+            }),
+            cue_states: std::array::from_fn(|_| {
+                ArcSwap::from_pointee(LayerCueState::default())
+            }),
+            mixer: ArcSwap::from_pointee(MixerSnapshot::default()),
         }
     }
 }
 
 impl ActiveNodeInner {
-    fn layer(&self, id: LayerId) -> &LayerSnapshot {
-        &self.layers[id.index()]
+    /// Take an owned snapshot of one layer.
+    fn layer(&self, id: LayerId) -> Arc<LayerSnapshot> {
+        self.layers[id.index()].load_full()
     }
-    fn layer_mut(&mut self, id: LayerId) -> &mut LayerSnapshot {
-        &mut self.layers[id.index()]
+
+    /// Read-copy-update a single layer: snapshot → modify → atomically
+    /// republish. Retries on concurrent writes.
+    fn update_layer<F>(&self, id: LayerId, mut f: F)
+    where
+        F: FnMut(&mut LayerSnapshot),
+    {
+        self.layers[id.index()].rcu(|cur| {
+            let mut new = (**cur).clone();
+            f(&mut new);
+            Arc::new(new)
+        });
+    }
+
+    /// Read-copy-update the mixer state.
+    fn update_mixer_state<F>(&self, mut f: F)
+    where
+        F: FnMut(&mut MixerSnapshot),
+    {
+        self.mixer.rcu(|cur| {
+            let mut new = (**cur).clone();
+            f(&mut new);
+            Arc::new(new)
+        });
+    }
+
+    /// Read-copy-update the cue state for a layer.
+    fn update_cue_state<F>(&self, id: LayerId, mut f: F)
+    where
+        F: FnMut(&mut LayerCueState),
+    {
+        self.cue_states[id.index()].rcu(|cur| {
+            let mut new = (**cur).clone();
+            f(&mut new);
+            Arc::new(new)
+        });
+    }
+
+    /// Snapshot every layer at once for packets that span all eight slots.
+    fn layers_snapshot(&self) -> [Arc<LayerSnapshot>; 8] {
+        std::array::from_fn(|i| self.layers[i].load_full())
     }
 
     fn build_time_packet(&self) -> Data {
-        let l = &self.layers;
+        // Snapshot all eight layers up front — every field below reads from
+        // the same atomic snapshot, so the packet is internally consistent
+        // even if the layers mutate concurrently.
+        let l = self.layers_snapshot();
         let tc = |snap: &LayerSnapshot| LayerTimecode {
             smpte_mode: smpte_to_u8(snap.smpte_mode),
             state: snap.tc_state,
@@ -190,7 +237,7 @@ impl ActiveNodeInner {
     }
 
     fn build_status_packet(&self) -> Data {
-        let l = &self.layers;
+        let l = self.layers_snapshot();
         let name_bytes = |s: &str| -> [u8; 16] {
             let mut buf = [0u8; 16];
             let b = s.as_bytes();
@@ -284,7 +331,7 @@ impl ActiveNodeInner {
     }
 
     fn build_mixer_packet(&self) -> Data {
-        let s = &self.mixer;
+        let s = self.mixer.load_full();
         let channels: [MixerChannel; 6] = std::array::from_fn(|i| {
             let ch = &s.channels[i];
             MixerChannel {
@@ -399,7 +446,7 @@ impl ActiveNodeInner {
 /// audio-derived data via [`set_response_waveforms`](Self::set_response_waveforms)
 /// and [`set_response_beat_grid`](Self::set_response_beat_grid).
 pub struct ActiveDJNode {
-    inner: Arc<Mutex<ActiveNodeInner>>,
+    inner: Arc<ActiveNodeInner>,
     broadcast_tx: kanal::Sender<Data>,
     slave_unicast_tx: kanal::Sender<Data>,
     #[allow(dead_code)]
@@ -415,7 +462,7 @@ impl ActiveDJNode {
         response_data: SharedResponseData,
         runtime: &Runtime,
     ) -> Self {
-        let inner = Arc::new(Mutex::new(ActiveNodeInner::default()));
+        let inner = Arc::new(ActiveNodeInner::default());
         let inner_bg = inner.clone();
         let bcast = broadcast_tx.clone();
         let sucast = slave_unicast_tx.clone();
@@ -429,12 +476,11 @@ impl ActiveDJNode {
             loop {
                 tokio::select! {
                     _ = time_tick.tick() => {
-                        let data = inner_bg.lock().unwrap().build_time_packet();
+                        let data = inner_bg.build_time_packet();
                         let _ = tcast.try_send(data);
                     }
                     _ = status_tick.tick() => {
-                        let inner = inner_bg.lock().unwrap();
-                        let status = inner.build_status_packet();
+                        let status = inner_bg.build_status_packet();
                         let _ = bcast.try_send(status);
                         // Re-unicast a Meta packet for every layer that
                         // currently holds a track. Meta is otherwise
@@ -445,8 +491,8 @@ impl ActiveDJNode {
                         // 1 Hz cadence is cheap and lets late-joining
                         // slaves catch up within a second.
                         for &id in LayerId::ALL.iter() {
-                            if inner.layer(id).track_id != 0 {
-                                let meta = inner.build_meta_packet(id);
+                            if inner_bg.layer(id).track_id != 0 {
+                                let meta = inner_bg.build_meta_packet(id);
                                 rd_bg.layers[id.index()]
                                     .last_meta
                                     .store(std::sync::Arc::new(Some(meta.clone())));
@@ -467,10 +513,9 @@ impl ActiveDJNode {
                         // `track_length_ms=0, bpm=0` on the slave, which
                         // breaks every downstream consumer (analysis,
                         // playhead, BPM-derived bar grid, …).
-                        let inner = inner_bg.lock().unwrap();
                         for &id in LayerId::ALL.iter() {
-                            if inner.layer(id).track_id != 0 {
-                                let data = inner.build_metrics_packet(id);
+                            if inner_bg.layer(id).track_id != 0 {
+                                let data = inner_bg.build_metrics_packet(id);
                                 rd_bg.layers[id.index()]
                                     .last_metrics
                                     .store(std::sync::Arc::new(Some(data.clone())));
@@ -500,7 +545,7 @@ impl ActiveDJNode {
     }
 
     fn update_metrics(&self, layer: LayerId) -> Result<(), SendError> {
-        let data = self.inner.lock().unwrap().build_metrics_packet(layer);
+        let data = self.inner.build_metrics_packet(layer);
         self.response_data.layers[layer.index()]
             .last_metrics
             .store(std::sync::Arc::new(Some(data.clone())));
@@ -508,7 +553,7 @@ impl ActiveDJNode {
     }
 
     fn update_meta(&self, layer: LayerId) -> Result<(), SendError> {
-        let data = self.inner.lock().unwrap().build_meta_packet(layer);
+        let data = self.inner.build_meta_packet(layer);
         self.response_data.layers[layer.index()]
             .last_meta
             .store(std::sync::Arc::new(Some(data.clone())));
@@ -516,7 +561,7 @@ impl ActiveDJNode {
     }
 
     fn update_mixer(&self) -> Result<(), SendError> {
-        let data = self.inner.lock().unwrap().build_mixer_packet();
+        let data = self.inner.build_mixer_packet();
         self.response_data
             .last_mixer
             .store(std::sync::Arc::new(Some(data.clone())));
@@ -527,40 +572,38 @@ impl ActiveDJNode {
 
     /// Mark `layer` as `Playing` and broadcast an updated [`MetricsData`].
     pub fn play(&mut self, layer: LayerId) -> Result<(), SendError> {
-        self.inner.lock().unwrap().layer_mut(layer).state = LayerState::Playing;
+        self.inner
+            .update_layer(layer, |snap| snap.state = LayerState::Playing);
         self.update_metrics(layer)
     }
 
     /// Mark `layer` as `Paused` at its current position and broadcast an
     /// updated [`MetricsData`].
     pub fn pause(&mut self, layer: LayerId) -> Result<(), SendError> {
-        self.inner.lock().unwrap().layer_mut(layer).state = LayerState::Paused;
+        self.inner
+            .update_layer(layer, |snap| snap.state = LayerState::Paused);
         self.update_metrics(layer)
     }
 
     /// Mark `layer` as `Stopped`, snap the playhead to position 0 and
     /// broadcast an updated [`MetricsData`].
     pub fn stop(&mut self, layer: LayerId) -> Result<(), SendError> {
-        {
-            let mut inner = self.inner.lock().unwrap();
-            let l = inner.layer_mut(layer);
+        self.inner.update_layer(layer, |l| {
             l.state = LayerState::Stopped;
             l.position_ms = 0;
             l.current_time_ms = 0;
-        }
+        });
         self.update_metrics(layer)
     }
 
     /// Move `layer` to `pos_ms` and report it as `CueButtonDown` — equivalent
     /// to holding a hot-cue on a physical CDJ.
     pub fn cue(&mut self, layer: LayerId, pos_ms: u32) -> Result<(), SendError> {
-        {
-            let mut inner = self.inner.lock().unwrap();
-            let l = inner.layer_mut(layer);
+        self.inner.update_layer(layer, |l| {
             l.state = LayerState::CueButtonDown;
             l.position_ms = pos_ms;
             l.current_time_ms = pos_ms;
-        }
+        });
         self.update_metrics(layer)
     }
 
@@ -591,9 +634,7 @@ impl ActiveDJNode {
         if !info.bpm.is_finite() || info.bpm <= 0.0 {
             return Err(SendError::Closed);
         }
-        {
-            let mut inner = self.inner.lock().unwrap();
-            let l = inner.layer_mut(layer);
+        self.inner.update_layer(layer, |l| {
             l.state = LayerState::Stopped;
             l.track_id = info.track_id;
             l.track_length_ms = info.duration_ms;
@@ -604,9 +645,10 @@ impl ActiveDJNode {
             l.artist = info.artist.clone();
             l.title = info.title.clone();
             l.name = info.title.clone();
-            // Clear per-track cue state.
-            inner.cue_states[layer.index()] = LayerCueState::default();
-        }
+        });
+        // Clear per-track cue state.
+        self.inner
+            .update_cue_state(layer, |cs| *cs = LayerCueState::default());
 
         // Pre-build response packets so the dispatcher can answer REQUEST packets.
         // Each field is its own ArcSwap — wait-free atomic stores, no locks.
@@ -706,7 +748,7 @@ impl ActiveDJNode {
         // Populate last_metrics so stopped tracks can respond to MetricsData requests.
         let _ = self.update_metrics(layer);
 
-        let status = self.inner.lock().unwrap().build_status_packet();
+        let status = self.inner.build_status_packet();
         self.send_broadcast(status)?;
         self.update_meta(layer)
     }
@@ -714,11 +756,9 @@ impl ActiveDJNode {
     /// Clear `layer` back to the default empty state and broadcast a
     /// [`StatusData`] so peers stop showing the previous track.
     pub fn unload_track(&mut self, layer: LayerId) -> Result<(), SendError> {
-        {
-            let mut inner = self.inner.lock().unwrap();
-            *inner.layer_mut(layer) = LayerSnapshot::default();
-        }
-        let data = self.inner.lock().unwrap().build_status_packet();
+        self.inner
+            .update_layer(layer, |snap| *snap = LayerSnapshot::default());
+        let data = self.inner.build_status_packet();
         self.send_broadcast(data)
     }
 
@@ -726,12 +766,10 @@ impl ActiveDJNode {
 
     /// Move `layer`'s playhead to `ms`. Broadcasts an updated [`MetricsData`].
     pub fn set_position_ms(&mut self, layer: LayerId, ms: u32) -> Result<(), SendError> {
-        {
-            let mut inner = self.inner.lock().unwrap();
-            let l = inner.layer_mut(layer);
+        self.inner.update_layer(layer, |l| {
             l.position_ms = ms;
             l.current_time_ms = ms;
-        }
+        });
         self.update_metrics(layer)
     }
 
@@ -753,32 +791,32 @@ impl ActiveDJNode {
         beat_marker: u8,
         beat_number: u32,
     ) -> Result<(), SendError> {
-        {
-            let mut inner = self.inner.lock().unwrap();
-            let l = inner.layer_mut(layer);
+        self.inner.update_layer(layer, |l| {
             l.position_ms = pos_ms;
             l.current_time_ms = pos_ms;
             l.beat_marker = beat_marker;
             l.beat_number = beat_number;
-        }
+        });
         self.update_metrics(layer)
     }
 
     /// Set the layer's BPM (encoded as `bpm × 100` on the wire).
     pub fn set_bpm(&mut self, layer: LayerId, bpm: f32) -> Result<(), SendError> {
-        self.inner.lock().unwrap().layer_mut(layer).bpm = Bpm((bpm * 100.0) as u32);
+        self.inner
+            .update_layer(layer, |l| l.bpm = Bpm((bpm * 100.0) as u32));
         self.update_metrics(layer)
     }
 
     /// Set the layer's playback [`Speed`] (32768 = 100%).
     pub fn set_speed(&mut self, layer: LayerId, speed: Speed) -> Result<(), SendError> {
-        self.inner.lock().unwrap().layer_mut(layer).speed = speed;
+        self.inner.update_layer(layer, |l| l.speed = speed);
         self.update_metrics(layer)
     }
 
     /// Mark `layer` as the sync master (or clear the flag).
     pub fn set_sync_master(&mut self, layer: LayerId, master: bool) -> Result<(), SendError> {
-        self.inner.lock().unwrap().layer_mut(layer).sync_master = master;
+        self.inner
+            .update_layer(layer, |l| l.sync_master = master);
         self.update_metrics(layer)
     }
 
@@ -788,7 +826,9 @@ impl ActiveDJNode {
     /// (cue data is request/response — peers fetch it on demand).
     fn rebuild_cue_packet(&self, layer: LayerId) {
         let lid = layer.as_packet_id();
-        let cue_data = self.inner.lock().unwrap().cue_states[layer.index()].to_cue_data(lid);
+        let cue_data = self.inner.cue_states[layer.index()]
+            .load()
+            .to_cue_data(lid);
         self.response_data.layers[layer.index()]
             .cue_packet
             .store(std::sync::Arc::new(Some(Data::Cue(cue_data))));
@@ -802,11 +842,12 @@ impl ActiveDJNode {
     /// Pass `None` to clear the marker. The slot-0 colour is fixed to CDJ
     /// orange (RGB `255, 128, 0`).
     pub fn set_cue_marker(&mut self, layer: LayerId, pos_ms: Option<u32>) {
-        self.inner.lock().unwrap().cue_states[layer.index()].cue_marker =
-            pos_ms.map(|p| HotCue {
+        self.inner.update_cue_state(layer, |cs| {
+            cs.cue_marker = pos_ms.map(|p| HotCue {
                 pos_ms: p,
                 color: [255, 128, 0],
             });
+        });
         self.rebuild_cue_packet(layer);
     }
 
@@ -814,16 +855,18 @@ impl ActiveDJNode {
     /// entries clear the corresponding pad. Updates the cached
     /// [`CueData`](crate::protocol::CueData) response.
     pub fn set_hot_cues(&mut self, layer: LayerId, hot_cues: [Option<HotCue>; 8]) {
-        self.inner.lock().unwrap().cue_states[layer.index()].hot_cues = hot_cues;
+        self.inner
+            .update_cue_state(layer, |cs| cs.hot_cues = hot_cues);
         self.rebuild_cue_packet(layer);
     }
 
     /// Set the layer's active loop range in milliseconds (or `(0, 0)` to
     /// clear).
     pub fn set_loop_range(&mut self, layer: LayerId, in_ms: u32, out_ms: u32) {
-        let cs = &mut self.inner.lock().unwrap().cue_states[layer.index()];
-        cs.loop_in_ms = in_ms;
-        cs.loop_out_ms = out_ms;
+        self.inner.update_cue_state(layer, |cs| {
+            cs.loop_in_ms = in_ms;
+            cs.loop_out_ms = out_ms;
+        });
         self.rebuild_cue_packet(layer);
     }
 
@@ -831,20 +874,22 @@ impl ActiveDJNode {
 
     /// Set the master fader level (0–255). Broadcasts an updated [`MixerData`].
     pub fn set_master_fader(&mut self, level: u8) -> Result<(), SendError> {
-        self.inner.lock().unwrap().mixer.master_fader_level = level;
+        self.inner
+            .update_mixer_state(|m| m.master_fader_level = level);
         self.update_mixer()
     }
 
     /// Set the crossfader position (0 = full A, 255 = full B).
     pub fn set_crossfader(&mut self, pos: u8) -> Result<(), SendError> {
-        self.inner.lock().unwrap().mixer.crossfader = pos;
+        self.inner.update_mixer_state(|m| m.crossfader = pos);
         self.update_mixer()
     }
 
     /// Set channel `ch`'s fader level (0–255). Channels are 0-based, 6 total.
     pub fn set_channel_fader(&mut self, ch: usize, level: u8) -> Result<(), SendError> {
         if ch < 6 {
-            self.inner.lock().unwrap().mixer.channels[ch].fader_level = level;
+            self.inner
+                .update_mixer_state(|m| m.channels[ch].fader_level = level);
         }
         self.update_mixer()
     }
@@ -852,7 +897,8 @@ impl ActiveDJNode {
     /// Set channel `ch`'s trim / gain (0–255).
     pub fn set_channel_trim(&mut self, ch: usize, level: u8) -> Result<(), SendError> {
         if ch < 6 {
-            self.inner.lock().unwrap().mixer.channels[ch].trim_level = level;
+            self.inner
+                .update_mixer_state(|m| m.channels[ch].trim_level = level);
         }
         self.update_mixer()
     }
@@ -860,10 +906,11 @@ impl ActiveDJNode {
     /// Set channel `ch`'s three-band EQ (each 0–255).
     pub fn set_channel_eq(&mut self, ch: usize, hi: u8, mid: u8, low: u8) -> Result<(), SendError> {
         if ch < 6 {
-            let mut inner = self.inner.lock().unwrap();
-            inner.mixer.channels[ch].eq_hi = hi;
-            inner.mixer.channels[ch].eq_hi_mid = mid;
-            inner.mixer.channels[ch].eq_low = low;
+            self.inner.update_mixer_state(|m| {
+                m.channels[ch].eq_hi = hi;
+                m.channels[ch].eq_hi_mid = mid;
+                m.channels[ch].eq_low = low;
+            });
         }
         self.update_mixer()
     }
@@ -871,7 +918,8 @@ impl ActiveDJNode {
     /// Set channel `ch`'s colour filter / sound-colour FX position (0–255).
     pub fn set_channel_filter(&mut self, ch: usize, val: u8) -> Result<(), SendError> {
         if ch < 6 {
-            self.inner.lock().unwrap().mixer.channels[ch].filter_color = val;
+            self.inner
+                .update_mixer_state(|m| m.channels[ch].filter_color = val);
         }
         self.update_mixer()
     }
@@ -884,9 +932,10 @@ impl ActiveDJNode {
         cue_b: bool,
     ) -> Result<(), SendError> {
         if ch < 6 {
-            let mut inner = self.inner.lock().unwrap();
-            inner.mixer.channels[ch].cue_a = cue_a;
-            inner.mixer.channels[ch].cue_b = cue_b;
+            self.inner.update_mixer_state(|m| {
+                m.channels[ch].cue_a = cue_a;
+                m.channels[ch].cue_b = cue_b;
+            });
         }
         self.update_mixer()
     }
@@ -897,7 +946,7 @@ impl ActiveDJNode {
     /// Does not broadcast immediately; the change is picked up by the next
     /// scheduled Time-packet emission (~20 ms cadence).
     pub fn set_on_air(&mut self, layer: LayerId, on_air: u8) {
-        self.inner.lock().unwrap().layer_mut(layer).on_air = on_air;
+        self.inner.update_layer(layer, |l| l.on_air = on_air);
     }
 
     /// Overwrite the cached beat-grid response for `layer` with real
@@ -999,17 +1048,21 @@ impl ActiveDJNode {
 
     /// Snapshot of the eight layer states currently being broadcast.
     pub fn layers(&self) -> Vec<LayerSnapshot> {
-        self.inner.lock().unwrap().layers.clone()
+        self.inner
+            .layers_snapshot()
+            .iter()
+            .map(|arc| (**arc).clone())
+            .collect()
     }
 
     /// Snapshot of the mixer state currently being broadcast.
     pub fn mixer(&self) -> MixerSnapshot {
-        self.inner.lock().unwrap().mixer.clone()
+        (**self.inner.mixer.load()).clone()
     }
 
     /// Snapshot of one channel's state (clamped to channel 5 if `ch >= 6`).
     pub fn channel_snapshot(&self, ch: usize) -> ChannelSnapshot {
-        self.inner.lock().unwrap().mixer.channels[ch.min(5)].clone()
+        self.inner.mixer.load().channels[ch.min(5)].clone()
     }
 }
 
