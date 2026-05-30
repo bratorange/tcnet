@@ -1,4 +1,4 @@
 target
-/TCNet-*.pdf
 *.pdf
+!/docs/spec/*.pdf
 /.claude/settings.local.json

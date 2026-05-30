@@ -10,6 +10,9 @@ documentation = "https://docs.rs/tcnet"
 homepage = "https://github.com/bratorange/tcnet"
 readme = "README.md"
 keywords = ["VJ", "Syncronization", "DJ"]
+# Keep the spec PDFs (and the architecture design doc) out of the
+# crates.io tarball — they're for the GitHub source tree only.
+exclude = ["docs/spec/*", "ARCHITECTURE.md"]
 
 [lib]
 name = "tcnet"
