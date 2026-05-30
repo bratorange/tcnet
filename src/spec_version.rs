@@ -360,6 +360,22 @@ impl<V: SpecVersion> From<V> for PeerVersion {
     }
 }
 
+impl PeerVersion {
+    /// Read a peer's protocol version out of the [`ManagementHeader`]
+    /// `protocol_version_major` / `protocol_version_minor` bytes.
+    ///
+    /// This is the runtime equivalent of the compile-time
+    /// [`SpecVersion`] markers — once a packet has been parsed we don't
+    /// know its peer's `SpecVersion` as a type, only as a `(major,
+    /// minor)` pair on the wire. `PeerVersion::from_header` is the
+    /// bridge between the two worlds.
+    ///
+    /// [`ManagementHeader`]: crate::protocol::ManagementHeader
+    pub fn from_header(h: &crate::protocol::ManagementHeader) -> Self {
+        Self::new(h.protocol_version_major, h.protocol_version_minor)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -411,5 +427,111 @@ mod tests {
         assert_eq!(pv, PeerVersion::new(3, 6));
         let pv: PeerVersion = V3_3_2.into();
         assert_eq!(pv, PeerVersion::new(3, 3));
+    }
+
+    #[test]
+    fn peer_version_from_header_reads_wire_bytes() {
+        use crate::protocol::ManagementHeader;
+        let h = ManagementHeader {
+            node_id: 0,
+            protocol_version_major: 3,
+            protocol_version_minor: 6,
+            _header: crate::into_ascii!("TCN"),
+            message_type: 0,
+            node_name: crate::into_ascii!("Test____"),
+            seq: 0,
+            node_type: crate::protocol::NodeType::Slave,
+            node_options: crate::protocol::NodeOptions::empty(),
+            timestamp: 0,
+        };
+        assert_eq!(PeerVersion::from_header(&h), PeerVersion::new(3, 6));
+
+        let h2 = ManagementHeader {
+            protocol_version_minor: 3,
+            ..h
+        };
+        assert_eq!(PeerVersion::from_header(&h2), PeerVersion::new(3, 3));
+    }
+
+    // ----------------------------------------------------------------
+    // Builder-gating demo — proves the IncludesFlame relation actually
+    // gates methods at compile time. Phase 5 wires real builders to
+    // this pattern; this module exists so the regression has a
+    // dedicated home now.
+    // ----------------------------------------------------------------
+
+    mod gating_demo {
+        use super::super::*;
+        use std::marker::PhantomData;
+
+        #[derive(Default)]
+        struct DemoBuilder<V: SpecVersion> {
+            layer: u8,
+            layer_name: Option<[u8; 16]>,
+            mixer_fader_a: Option<u8>,
+            _v: PhantomData<V>,
+        }
+
+        impl<V: SpecVersion> DemoBuilder<V> {
+            fn new() -> Self {
+                Self::default()
+            }
+            fn with_layer(mut self, layer: u8) -> Self {
+                self.layer = layer;
+                self
+            }
+        }
+
+        // Only versions that include LayerNameFlame may set a name.
+        impl<V: SpecVersion + IncludesFlame<LayerNameFlame>> DemoBuilder<V> {
+            fn with_layer_name(mut self, name: [u8; 16]) -> Self {
+                self.layer_name = Some(name);
+                self
+            }
+        }
+
+        // Only versions that include MixerDataFlame may set mixer fields.
+        impl<V: SpecVersion + IncludesFlame<MixerDataFlame>> DemoBuilder<V> {
+            fn with_mixer_fader_a(mut self, level: u8) -> Self {
+                self.mixer_fader_a = Some(level);
+                self
+            }
+        }
+
+        #[test]
+        fn gating_demo_v3_6_has_all_methods() {
+            let b = DemoBuilder::<V3_6>::new()
+                .with_layer(1)
+                .with_layer_name([b'A'; 16])
+                .with_mixer_fader_a(127);
+            assert_eq!(b.layer, 1);
+            assert!(b.layer_name.is_some());
+            assert!(b.mixer_fader_a.is_some());
+        }
+
+        #[test]
+        fn gating_demo_v3_3_2_has_layer_name_but_not_mixer() {
+            let b = DemoBuilder::<V3_3_2>::new()
+                .with_layer(2)
+                .with_layer_name([b'B'; 16]);
+            assert_eq!(b.layer, 2);
+            assert!(b.layer_name.is_some());
+            // The following line would NOT compile (commented out by
+            // design; uncommenting must produce E0599 "method not found
+            // in `DemoBuilder<V3_3_2>`"):
+            //
+            //   let _ = b.with_mixer_fader_a(127);
+        }
+
+        #[test]
+        fn gating_demo_v3_3_has_neither_extension() {
+            let b = DemoBuilder::<V3_3>::new().with_layer(3);
+            assert_eq!(b.layer, 3);
+            // Neither of these compiles for V3_3 — V3.3 predates both
+            // LayerName (V3.3.2) and MixerData (V3.4.1):
+            //
+            //   let _ = b.with_layer_name([0; 16]);
+            //   let _ = b.with_mixer_fader_a(0);
+        }
     }
 }
