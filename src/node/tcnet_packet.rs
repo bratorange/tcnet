@@ -59,7 +59,11 @@ impl Packet {
                     RequestData::from_bytes(remaining).map_err(SerdeError::InvalidData)?;
                 Request(inner)
             }
-            30 => {
+            // Type 30 and 213 are both AppSpecific (different transport: 30
+            // unicasts on Target-Node-Port, 213 broadcasts on 60000). The
+            // payload layout is identical so we route both into the same
+            // variant.
+            30 | 213 => {
                 let (_, inner) =
                     AppSpecificData::from_bytes(remaining).map_err(SerdeError::InvalidData)?;
                 AppSpecific(inner)
@@ -169,6 +173,31 @@ pub(crate) fn node_config_from_opt_in(
         node_name: header.node_name,
         node_options: header.node_options,
         address: SocketAddrV4::new(src_addr, data.node_listener_port),
+    }
+}
+
+/// Build a best-effort [`ApplicationConfig`] from a [`ManagementHeader`]
+/// when we have no matching OptIn yet — used by `is_dj_packet` routing for
+/// nodes whose first packet was a DJ-class one. `node_id`, `node_type`,
+/// `node_name` and `node_options` carry across faithfully; the OptIn-only
+/// fields (vendor / app name / version) fall back to defaults until the
+/// real OptIn arrives and overwrites the entry.
+pub(crate) fn config_from_header(
+    header: &ManagementHeader,
+    src_addr: Ipv4Addr,
+) -> ApplicationConfig {
+    let defaults = ApplicationConfig::default();
+    ApplicationConfig {
+        node_id: header.node_id,
+        node_type: header.node_type,
+        vendor_name: defaults.vendor_name,
+        application_name: defaults.application_name,
+        application_major_version: 0,
+        application_minor_version: 0,
+        application_bug_version: 0,
+        node_name: header.node_name,
+        node_options: header.node_options,
+        address: SocketAddrV4::new(src_addr, 65_023),
     }
 }
 

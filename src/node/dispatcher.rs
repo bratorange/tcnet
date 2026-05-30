@@ -4,7 +4,7 @@ use crate::node::response_data::SharedResponseData;
 use crate::node::tcnet_packet::Data;
 use crate::node::tcnet_packet::Data::{OptIn, OptOut};
 use crate::node::tcnet_packet::{
-    Packet, management_header, node_config_from_opt_in, opt_in_packet,
+    Packet, config_from_header, management_header, node_config_from_opt_in, opt_in_packet,
 };
 use crate::node::{ApplicationConfig, DynamicNodeState, ForeignNode};
 use crate::protocol::{LayerId, NodeType, RequestDataType};
@@ -39,6 +39,11 @@ pub struct Dispatcher {
     pub(crate) active_time_rx: kanal::Receiver<Data>,
     /// Shared store for pre-built request-response payloads.
     pub(crate) response_data: SharedResponseData,
+    /// Broadcast destinations for OptIn / OptOut. Populated by `broadcast()`
+    /// on start-up so that a synchronous `Drop` impl can reuse the same
+    /// fan-out (including the loopback fallback) without re-running
+    /// `best_local_ipv4_addrs`.
+    pub(crate) broadcast_targets: Mutex<Vec<SocketAddrV4>>,
 }
 
 /// Try to bind a UDP socket at `preferred_port`, incrementing until a free port is found.
@@ -208,11 +213,32 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
                                         build_request_response(req.data_type, req.layer, &rd);
                                     (dest, packets)
                                 };
-                                for pkt in packets {
+                                if packets.is_empty() {
+                                    // Spec V3.5.1B page 9: when there is no
+                                    // payload to return, reply with an
+                                    // ErrorNotification (code 014 = EMPTY,
+                                    // message_type 20 = original Request)
+                                    // so the peer can fail fast instead of
+                                    // hitting its 5 s read timeout.
+                                    let err = Data::ErrorNotification(
+                                        crate::protocol::ErrorNotificationData::new(
+                                            req.data_type,
+                                            req.layer.as_packet_id(),
+                                            14,
+                                            20,
+                                        ),
+                                    );
                                     let _ = dispatcher.outgoing_tx.try_send(OutgoingRequest {
                                         destination: dest,
-                                        data: pkt,
+                                        data: err,
                                     });
+                                } else {
+                                    for pkt in packets {
+                                        let _ = dispatcher.outgoing_tx.try_send(OutgoingRequest {
+                                            destination: dest,
+                                            data: pkt,
+                                        });
+                                    }
                                 }
                             }
 
@@ -241,6 +267,10 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
                                 .get(&key)
                                 .map(|n| n.address)
                                 .unwrap_or(SocketAddrV4::new(src_ip, 65_023));
+                            // When a DJ packet arrives before its OptIn we still
+                            // need to publish a useful node_id/name etc — lift
+                            // them from the header instead of ApplicationConfig::default.
+                            let header_config = config_from_header(&packet.header, src_ip);
                             state
                                 .discovered_nodes
                                 .entry(key)
@@ -269,7 +299,7 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
                                     ForeignNode {
                                         last_seen: timestamp_secs(),
                                         address: node_addr,
-                                        config: ApplicationConfig::default(),
+                                        config: header_config,
                                         dj_controller: Some(ctrl),
                                     }
                                 });
@@ -339,10 +369,13 @@ async fn send(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) {
             };
             match serde_result {
                 Ok(bytes) => {
-                    socket
-                        .send_to(&bytes, target)
-                        .await
-                        .expect("Could not send packet!");
+                    if let Err(e) = socket.send_to(&bytes, target).await {
+                        // UDP send_to can fail asynchronously (ENETUNREACH,
+                        // EMSGSIZE, ECONNREFUSED on connected sockets).
+                        // Log and continue — one bad destination must not
+                        // bring down the entire send task.
+                        warn!("send_to {} failed: {}", target, e);
+                    }
                 }
                 Err(err) => error!("Serializing malformed packet, caused {}", err),
             }
@@ -367,6 +400,11 @@ async fn broadcast(dispatcher: Arc<Dispatcher>, broadcast_socket: Arc<UdpSocket>
         .unwrap_or(false);
     if on_fallback_port {
         ipv4_addrs.insert(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 60_000));
+    }
+    // Publish the broadcast destinations on the dispatcher so that the
+    // sync `Drop` impl in lib.rs can fan an OptOut packet to the same set.
+    if let Ok(mut targets) = dispatcher.broadcast_targets.lock() {
+        *targets = ipv4_addrs.iter().copied().collect();
     }
     info!("Broadcasting opt in packets to {:?}", ipv4_addrs);
     let mut tick = interval(Duration::from_secs(1));
@@ -426,6 +464,10 @@ async fn timeout_foreign_nodes(node: Arc<Dispatcher>) {
         let secs = timestamp_secs();
         {
             let mut state = node.state.write().await;
+            // Spec V3.5.1B page 4: OptIn `uptime` is seconds-since-start and
+            // must roll over every 12 h (= 43_200 s). One increment per
+            // second matches the 1 Hz tick we are already on.
+            state.uptime = (state.uptime + 1) % 43_200;
             state.discovered_nodes.retain(|_, foreign_node| {
                 let keep = foreign_node.last_seen + 10 > secs;
                 if !keep {
@@ -465,8 +507,6 @@ async fn active_broadcast(
         .map(|net| SocketAddr::V4(SocketAddrV4::new(net.broadcast(), 60_001)))
         .collect();
 
-    let mut seq: u8 = 128;
-
     loop {
         // Read node count and addresses once per loop iteration.
         let (node_count, all_addrs, slave_addrs) = {
@@ -483,8 +523,10 @@ async fn active_broadcast(
             (node_count, all_addrs, slave_addrs)
         };
 
-        // Status packets — broadcast on port 60000, plus unicast to all discovered nodes.
-        // Nodes that fell back to a non-canonical port still receive Status via unicast.
+        // Status packets — broadcast on port 60000, plus unicast to each
+        // slave / repeater (spec page 6: "Broadcast on port 60000, Unicast
+        // to all slaves"). Master / Auto peers receive the broadcast copy
+        // only.
         let mut msgs: Vec<Data> = Vec::new();
         let _ = dispatcher.active_broadcast_rx.drain_into(&mut msgs);
         for mut data in msgs {
@@ -492,14 +534,14 @@ async fn active_broadcast(
                 s.node_count = node_count;
             }
             let (msg_type_id, _) = data.message_type_id();
+            let seq = next_seq(&dispatcher).await;
             let header = management_header(&dispatcher.node_config, msg_type_id, seq);
-            seq = seq.wrapping_add(1);
             let packet = Packet { header, data };
             if let Ok(bytes) = packet.to_bytes() {
                 for addr in &broadcast_addrs_60000 {
                     let _ = socket_60000.send_to(&bytes, addr).await;
                 }
-                for addr in &all_addrs {
+                for addr in &slave_addrs {
                     let _ = socket_60000.send_to(&bytes, addr).await;
                 }
             }
@@ -513,8 +555,8 @@ async fn active_broadcast(
         if !slave_msgs.is_empty() {
             for data in slave_msgs {
                 let (msg_type_id, _) = data.message_type_id();
+                let seq = next_seq(&dispatcher).await;
                 let header = management_header(&dispatcher.node_config, msg_type_id, seq);
-                seq = seq.wrapping_add(1);
                 let packet = Packet { header, data };
                 if let Ok(bytes) = packet.to_bytes() {
                     for addr in &slave_addrs {
@@ -531,8 +573,8 @@ async fn active_broadcast(
         let _ = dispatcher.active_time_rx.drain_into(&mut time_msgs);
         for data in time_msgs {
             let (msg_type_id, _) = data.message_type_id();
+            let seq = next_seq(&dispatcher).await;
             let header = management_header(&dispatcher.node_config, msg_type_id, seq);
-            seq = seq.wrapping_add(1);
             let packet = Packet { header, data };
             if let Ok(bytes) = packet.to_bytes() {
                 for addr in &broadcast_addrs_60001 {
@@ -547,6 +589,19 @@ async fn active_broadcast(
 
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+}
+
+/// Pull the next sequence number from the shared dispatcher state and bump
+/// it (wrapping at 256). Replaces the formerly-local counter inside
+/// `active_broadcast()` that ran independently of the one
+/// `send()`/`broadcast()` already share via `state.current_seq` — so SEQ
+/// bytes on the wire now form a single monotonically-increasing stream
+/// instead of two interleaved ones.
+async fn next_seq(dispatcher: &Dispatcher) -> u8 {
+    let mut state = dispatcher.state.write().await;
+    let cur = state.current_seq;
+    (state.current_seq, _) = state.current_seq.overflowing_add(1);
+    cur
 }
 
 pub fn timestamp_micros() -> u32 {

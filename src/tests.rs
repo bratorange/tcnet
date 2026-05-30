@@ -118,7 +118,7 @@ fn status_bytes(config: &ApplicationConfig, seq: u8) -> (Vec<u8>, Vec<u8>) {
         layer_c_track_id: 0,
         _reserved1: Default::default(),
         smpte_mode: 25,
-        auto_master_mode: AutoMasterMode::Variant,
+        auto_master_mode: AutoMasterMode::Disabled,
         _reserved2: Default::default(),
         app_specific: [0u8; 72],
         layer_1_name,

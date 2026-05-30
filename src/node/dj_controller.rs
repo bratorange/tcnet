@@ -309,8 +309,6 @@ impl DjController {
 
 enum PendingReply {
     SmallWaveform(oneshot::Sender<Result<SmallWaveformData, TimeoutError>>),
-    BigWaveform(oneshot::Sender<Result<BigWaveformData, TimeoutError>>),
-    ArtworkFile(oneshot::Sender<Result<ArtworkFileData, TimeoutError>>),
     CueData(oneshot::Sender<Result<CueData, TimeoutError>>),
     BeatGrid {
         reply: oneshot::Sender<Result<BeatGridHeader, TimeoutError>>,
@@ -321,6 +319,22 @@ enum PendingReply {
         /// Layer id from the first chunk — emitted on the reassembled header.
         layer_id: u8,
         /// Total payload size in bytes from the first chunk's `data_size`.
+        total_data_size: u32,
+    },
+    /// Same chunked-accumulator shape as `BeatGrid`, for the big waveform
+    /// response (multi-packet, typically ~4400 B per chunk).
+    BigWaveform {
+        reply: oneshot::Sender<Result<BigWaveformData, TimeoutError>>,
+        chunks: Vec<Option<Vec<u8>>>,
+        layer_id: u8,
+        total_data_size: u32,
+    },
+    /// Same chunked-accumulator shape as `BeatGrid`, for the low-res
+    /// artwork JPEG response.
+    ArtworkFile {
+        reply: oneshot::Sender<Result<ArtworkFileData, TimeoutError>>,
+        chunks: Vec<Option<Vec<u8>>>,
+        layer_id: u8,
         total_data_size: u32,
     },
 }
@@ -341,11 +355,11 @@ fn fire_timeout(pending: &mut Vec<PendingRequest>) {
                 PendingReply::SmallWaveform(tx) => {
                     let _ = tx.send(Err(TimeoutError));
                 }
-                PendingReply::BigWaveform(tx) => {
-                    let _ = tx.send(Err(TimeoutError));
+                PendingReply::BigWaveform { reply, .. } => {
+                    let _ = reply.send(Err(TimeoutError));
                 }
-                PendingReply::ArtworkFile(tx) => {
-                    let _ = tx.send(Err(TimeoutError));
+                PendingReply::ArtworkFile { reply, .. } => {
+                    let _ = reply.send(Err(TimeoutError));
                 }
                 PendingReply::BeatGrid { reply, .. } => {
                     let _ = reply.send(Err(TimeoutError));
@@ -410,14 +424,70 @@ async fn dj_controller_task(
                 }
                 Data::BigWaveform(w) => {
                     if let Some(layer) = LayerId::from_packet_id(w.layer_id) {
+                        // Multi-packet reassembly mirroring the BeatGrid arm
+                        // below — accumulate every chunk by `packet_no`,
+                        // resolve the pending future only once every chunk
+                        // has arrived.
                         let mut i = 0;
                         while i < pending.len() {
-                            if pending[i].layer == layer
-                                && matches!(pending[i].reply, PendingReply::BigWaveform(_))
+                            if pending[i].layer != layer
+                                || !matches!(pending[i].reply, PendingReply::BigWaveform { .. })
                             {
+                                i += 1;
+                                continue;
+                            }
+
+                            let total_packets = w.total_packets.max(1) as usize;
+                            let pkt_no = w.packet_no as usize;
+
+                            if let PendingReply::BigWaveform {
+                                chunks,
+                                layer_id,
+                                total_data_size,
+                                ..
+                            } = &mut pending[i].reply
+                            {
+                                if chunks.is_empty() {
+                                    chunks.resize(total_packets, None);
+                                    *layer_id = w.layer_id;
+                                    *total_data_size = w.data_size;
+                                }
+                                if pkt_no < chunks.len() {
+                                    chunks[pkt_no] = Some(w.waveform_data.clone());
+                                }
+                            }
+
+                            let complete = if let PendingReply::BigWaveform { chunks, .. } =
+                                &pending[i].reply
+                            {
+                                !chunks.is_empty() && chunks.iter().all(|c| c.is_some())
+                            } else {
+                                false
+                            };
+
+                            if complete {
                                 let p = pending.swap_remove(i);
-                                if let PendingReply::BigWaveform(tx) = p.reply {
-                                    let _ = tx.send(Ok(w.clone()));
+                                if let PendingReply::BigWaveform {
+                                    reply,
+                                    chunks,
+                                    layer_id,
+                                    total_data_size,
+                                } = p.reply
+                                {
+                                    let mut assembled: Vec<u8> =
+                                        Vec::with_capacity(total_data_size as usize);
+                                    for chunk in chunks.into_iter().flatten() {
+                                        assembled.extend(chunk);
+                                    }
+                                    let assembled_size = assembled.len() as u32;
+                                    let big = BigWaveformData::new_packet(
+                                        layer_id,
+                                        assembled_size,
+                                        1,
+                                        0,
+                                        assembled,
+                                    );
+                                    let _ = reply.send(Ok(big));
                                 }
                             } else {
                                 i += 1;
@@ -427,14 +497,67 @@ async fn dj_controller_task(
                 }
                 Data::ArtworkFile(a) => {
                     if let Some(layer) = LayerId::from_packet_id(a.layer_id) {
+                        // Same chunked accumulation as BigWaveform.
                         let mut i = 0;
                         while i < pending.len() {
-                            if pending[i].layer == layer
-                                && matches!(pending[i].reply, PendingReply::ArtworkFile(_))
+                            if pending[i].layer != layer
+                                || !matches!(pending[i].reply, PendingReply::ArtworkFile { .. })
                             {
+                                i += 1;
+                                continue;
+                            }
+
+                            let total_packets = a.total_packets.max(1) as usize;
+                            let pkt_no = a.packet_no as usize;
+
+                            if let PendingReply::ArtworkFile {
+                                chunks,
+                                layer_id,
+                                total_data_size,
+                                ..
+                            } = &mut pending[i].reply
+                            {
+                                if chunks.is_empty() {
+                                    chunks.resize(total_packets, None);
+                                    *layer_id = a.layer_id;
+                                    *total_data_size = a.data_size;
+                                }
+                                if pkt_no < chunks.len() {
+                                    chunks[pkt_no] = Some(a.file_data.clone());
+                                }
+                            }
+
+                            let complete = if let PendingReply::ArtworkFile { chunks, .. } =
+                                &pending[i].reply
+                            {
+                                !chunks.is_empty() && chunks.iter().all(|c| c.is_some())
+                            } else {
+                                false
+                            };
+
+                            if complete {
                                 let p = pending.swap_remove(i);
-                                if let PendingReply::ArtworkFile(tx) = p.reply {
-                                    let _ = tx.send(Ok(a.clone()));
+                                if let PendingReply::ArtworkFile {
+                                    reply,
+                                    chunks,
+                                    layer_id,
+                                    total_data_size,
+                                } = p.reply
+                                {
+                                    let mut assembled: Vec<u8> =
+                                        Vec::with_capacity(total_data_size as usize);
+                                    for chunk in chunks.into_iter().flatten() {
+                                        assembled.extend(chunk);
+                                    }
+                                    let assembled_size = assembled.len() as u32;
+                                    let art = ArtworkFileData::new_packet(
+                                        layer_id,
+                                        assembled_size,
+                                        1,
+                                        0,
+                                        assembled,
+                                    );
+                                    let _ = reply.send(Ok(art));
                                 }
                             } else {
                                 i += 1;
@@ -582,7 +705,12 @@ async fn dj_controller_task(
                     pending.push(PendingRequest {
                         layer,
                         deadline: Instant::now() + Duration::from_secs(5),
-                        reply: PendingReply::BigWaveform(reply),
+                        reply: PendingReply::BigWaveform {
+                            reply,
+                            chunks: Vec::new(),
+                            layer_id: 0,
+                            total_data_size: 0,
+                        },
                     });
                 }
                 UserRequest::ArtworkFile { layer, reply } => {
@@ -596,7 +724,12 @@ async fn dj_controller_task(
                     pending.push(PendingRequest {
                         layer,
                         deadline: Instant::now() + Duration::from_secs(5),
-                        reply: PendingReply::ArtworkFile(reply),
+                        reply: PendingReply::ArtworkFile {
+                            reply,
+                            chunks: Vec::new(),
+                            layer_id: 0,
+                            total_data_size: 0,
+                        },
                     });
                 }
                 UserRequest::BeatGrid { layer, reply } => {

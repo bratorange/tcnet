@@ -81,9 +81,10 @@ impl DekuReader<'_> for NodeOptions {
         Self: Sized,
     {
         let mut buf = [0u8; 2];
-        let _ = reader.read_bytes(2, &mut buf, Order::Lsb0);
-        let bits = u16::from_le_bytes(buf);
-        Ok(NodeOptions::from_bits(bits).unwrap())
+        reader.read_bytes(2, &mut buf, Order::Lsb0)?;
+        // `from_bits_truncate` silently drops unknown bits — required so that a
+        // peer announcing a forward-compatible flag does not crash the listener.
+        Ok(NodeOptions::from_bits_truncate(u16::from_le_bytes(buf)))
     }
 }
 
@@ -135,14 +136,24 @@ pub enum NodeType {
     Repeater = 8,
 }
 
-/// Carried in [`StatusData`] when a node is configured for automatic master
-/// election. Only one variant is currently defined by the spec.
+/// Auto-master election mode carried in [`StatusData`].
+///
+/// Spec V3.5.1B page 7: `0 = Disabled`, `1 = HTP Master`, `2 = Link Master`.
+/// Anything else lands in [`AutoMasterMode::Unknown`] so a forward-compatible
+/// value does not fail packet decoding.
 #[derive(Debug, PartialEq, Clone, Copy, DekuRead, DekuWrite)]
 #[deku(id_type = "u8")]
 #[repr(u8)]
 pub enum AutoMasterMode {
-    /// Default / unspecified.
-    Variant = 0,
+    /// Auto-master election is off.
+    Disabled = 0,
+    /// HTP (highest-takes-priority) master.
+    HtpMaster = 1,
+    /// Link master.
+    LinkMaster = 2,
+    /// Any value not enumerated above is preserved here.
+    #[deku(id_pat = "_")]
+    Unknown(u8),
 }
 
 /// Fixed-size ASCII identifier carried in many TCNet packets.
@@ -519,8 +530,8 @@ pub struct StatusData {
 /// timeout.
 #[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
 pub struct OptOutData {
-    node_count: u16,         // Amount of Registered Nodes
-    node_listener_port: u16, // Listener Port for Unicast Messages
+    pub(crate) node_count: u16,         // Amount of Registered Nodes
+    pub(crate) node_listener_port: u16, // Listener Port for Unicast Messages
 }
 
 /// Clock synchronisation handshake (message type 10).
@@ -543,6 +554,28 @@ pub struct ErrorNotificationData {
     layer_id: u8,              // Layer ID of original request
     code: u16,                 // Returned Code
     message_type: u16,         // Message type of Request
+}
+
+impl ErrorNotificationData {
+    /// Build an error/notification packet payload.
+    ///
+    /// * `datatype` — the [`RequestDataType`] of the failed request.
+    /// * `layer_id` — layer the request targeted (`0` if not layer-scoped).
+    /// * `code` — spec code (1=Unknown, 13=NotPossible, 14=Empty, 255=OK).
+    /// * `message_type` — message type of the request (typically `20`).
+    pub(crate) fn new(
+        datatype: RequestDataType,
+        layer_id: u8,
+        code: u16,
+        message_type: u16,
+    ) -> Self {
+        Self {
+            datatype,
+            layer_id,
+            code,
+            message_type,
+        }
+    }
 }
 
 /// On-demand data request (message type 20).
@@ -714,6 +747,8 @@ pub struct CueEntry {
 /// Cue and loop information for a layer (message type 200, data type 12).
 ///
 /// Carries up to 18 cue entries plus the current loop in/out points (in ms).
+/// Total on-wire size with the 24-byte [`ManagementHeader`] = 456 bytes per
+/// spec V3.5.1B page 18.
 #[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone, serde::Serialize)]
 pub struct CueData {
     data_type: u8,                // Datatype 12 = Cue Data
@@ -724,6 +759,11 @@ pub struct CueData {
     #[deku(endian = "little")]
     loop_out: u32, // Loop OUT Time
     cues: [CueEntry; 18],         // CUE 1-18
+    /// Trailing reserved bytes that bring the packet up to the spec-mandated
+    /// 456-byte total. The field-by-field offsets in the spec table only sum
+    /// to 443 bytes, but the stated total is 456 — Pioneer firmware
+    /// historically appends a tail block here.
+    _reserved1: ReservedData<10>,
 }
 
 /// Low-resolution full-track waveform (message type 200, data type 16).
@@ -760,15 +800,15 @@ pub struct BigWaveformData {
     data_type: u8,    // Datatype 32 = Big Waveform
     pub layer_id: u8, // Layer Number
     #[deku(endian = "little")]
-    data_size: u32, // Total Data size
+    pub(crate) data_size: u32, // Total Data size
     #[deku(endian = "little")]
-    total_packets: u32, // Total Packets used for data
+    pub(crate) total_packets: u32, // Total Packets used for data
     #[deku(endian = "little")]
-    packet_no: u32, // Packet Number
+    pub(crate) packet_no: u32, // Packet Number
     #[deku(endian = "little")]
-    data_cluster_size: u32, // Data Cluster Size (standard: 4800)
+    pub(crate) data_cluster_size: u32, // Data Cluster Size (standard: 4800)
     #[deku(count = "data_cluster_size")]
-    waveform_data: Vec<u8>, // BLevel (Odd Bytes) / BColor (Even Bytes)
+    pub(crate) waveform_data: Vec<u8>, // BLevel (Odd Bytes) / BColor (Even Bytes)
 }
 
 /// State of one mixer channel — a single fader strip on the physical mixer.
@@ -874,15 +914,15 @@ pub struct ArtworkFileData {
     data_type: u8,    // Datatype 128 = Low Res Artwork File
     pub layer_id: u8, // Layer Number
     #[deku(endian = "little")]
-    data_size: u32, // Total Data size
+    pub(crate) data_size: u32, // Total Data size
     #[deku(endian = "little")]
-    total_packets: u32, // Total Packets used for data
+    pub(crate) total_packets: u32, // Total Packets used for data
     #[deku(endian = "little")]
-    packet_no: u32, // Packet Number
+    pub(crate) packet_no: u32, // Packet Number
     #[deku(endian = "little")]
-    data_cluster_size: u32, // Data Cluster Size (standard: 4800)
+    pub(crate) data_cluster_size: u32, // Data Cluster Size (standard: 4800)
     #[deku(count = "data_cluster_size")]
-    file_data: Vec<u8>, // Raw JPEG file data
+    pub(crate) file_data: Vec<u8>, // Raw JPEG file data
 }
 
 /// Application-specific data passthrough (message type 30 or 213).
@@ -1172,6 +1212,7 @@ impl CueData {
             loop_in: 0,
             loop_out: 0,
             cues,
+            _reserved1: ReservedData::default(),
         }
     }
 
@@ -1186,6 +1227,7 @@ impl CueData {
             loop_in,
             loop_out,
             cues,
+            _reserved1: ReservedData::default(),
         }
     }
 

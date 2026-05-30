@@ -228,7 +228,7 @@ impl ActiveNodeInner {
             layer_c_track_id: l[7].track_id,
             _reserved1: ReservedData::default(),
             smpte_mode: smpte_to_u8(l[0].smpte_mode),
-            auto_master_mode: AutoMasterMode::Variant,
+            auto_master_mode: AutoMasterMode::Disabled,
             _reserved2: ReservedData::default(),
             app_specific: [0; 72],
             layer_1_name: name_bytes(&l[0].name),
@@ -584,6 +584,13 @@ impl ActiveDJNode {
     /// Finally broadcasts a [`StatusData`] packet and unicasts a [`MetaData`]
     /// packet so peers see the new track immediately.
     pub fn load_track(&mut self, layer: LayerId, info: TrackMeta) -> Result<(), SendError> {
+        // Guard against pathological BPM values. The beat-grid synthesiser
+        // below loops while `(beat * 60000.0 / bpm) as u32 <= duration_ms`;
+        // a non-finite or non-positive bpm makes that condition forever
+        // false and the loop overflows `u16` (debug) or spins (release).
+        if !info.bpm.is_finite() || info.bpm <= 0.0 {
+            return Err(SendError::Closed);
+        }
         {
             let mut inner = self.inner.lock().unwrap();
             let l = inner.layer_mut(layer);

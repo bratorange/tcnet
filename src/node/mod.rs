@@ -40,7 +40,7 @@ pub(crate) struct DynamicNodeState {
 /// let mut config = ApplicationConfig::default();
 /// config.node_id = 0x42;
 /// config.node_type = NodeType::Slave;
-/// config.application_name = into_ascii!("myviz__________");
+/// config.application_name = into_ascii!("myviz___________");
 /// config.address = SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 50), 65023);
 /// ```
 ///

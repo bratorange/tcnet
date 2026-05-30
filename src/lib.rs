@@ -37,7 +37,11 @@
 //!
 //! // Wait for a foreign DJ controller to be discovered, then read its state.
 //! loop {
-//!     for node in client.active_nodes() {
+//!     // Materialise the snapshot into an owned Vec so that the &mut borrow
+//!     // active_nodes() returns is released before we re-borrow `client` to
+//!     // call get_controller_view().
+//!     let nodes: Vec<_> = client.active_nodes().to_vec();
+//!     for node in &nodes {
 //!         if node.has_dj_controller {
 //!             if let Some(mut view) = client.get_controller_view(node.address) {
 //!                 for (i, layer) in view.get_layers().iter().enumerate() {
@@ -247,6 +251,7 @@ impl TCNetClient {
             active_slave_unicast_rx,
             active_time_rx,
             response_data: response_data.clone(),
+            broadcast_targets: Mutex::new(Vec::new()),
         });
 
         runtime.spawn(start_node(dispatcher.clone()));
@@ -331,5 +336,64 @@ impl TCNetClient {
             self.response_data.clone(),
             &self._runtime,
         )
+    }
+}
+
+impl Drop for TCNetClient {
+    /// Best-effort OptOut broadcast on shutdown.
+    ///
+    /// Spec V3.5.1B page 5: a node should broadcast (and unicast) one OptOut
+    /// packet when leaving the network so peers can drop it immediately
+    /// instead of waiting for the 10 s silence timeout. We do this here
+    /// synchronously using a fresh `std::net::UdpSocket`, because by the
+    /// time `Drop` runs the embedded tokio runtime may be tearing down its
+    /// own background tasks and we cannot rely on the dispatcher's send
+    /// path being alive.
+    fn drop(&mut self) {
+        use crate::node::tcnet_packet::management_header;
+        use crate::protocol::OptOutData;
+        use deku::DekuContainerWrite;
+        use std::sync::atomic::Ordering;
+
+        let cfg = self.dispatcher.node_config;
+        let unicast_port = self.dispatcher.actual_unicast_port.load(Ordering::Relaxed);
+
+        // Snapshot broadcast destinations + discovered nodes.
+        let bcast_targets: Vec<std::net::SocketAddrV4> = self
+            .dispatcher
+            .broadcast_targets
+            .lock()
+            .map(|v| v.clone())
+            .unwrap_or_default();
+        let unicast_targets: Vec<std::net::SocketAddrV4> = self._runtime.block_on(async {
+            let state = self.dispatcher.state.read().await;
+            state.discovered_nodes.values().map(|n| n.address).collect()
+        });
+
+        // Build the OptOut packet bytes.
+        let (seq, node_count) = self._runtime.block_on(async {
+            let mut state = self.dispatcher.state.write().await;
+            let cur = state.current_seq;
+            (state.current_seq, _) = state.current_seq.overflowing_add(1);
+            (cur, (state.discovered_nodes.len() + 1) as u16)
+        });
+        let header = management_header(&cfg, 3, seq);
+        let data = OptOutData {
+            node_count,
+            node_listener_port: unicast_port,
+        };
+        let bytes = match (header.to_bytes(), data.to_bytes()) {
+            (Ok(h), Ok(d)) => [h, d].concat(),
+            _ => return,
+        };
+
+        // Fan out via a one-shot sync socket. Best effort — any failure is
+        // logged via the existing `warn!` infrastructure but not propagated.
+        if let Ok(sock) = std::net::UdpSocket::bind("0.0.0.0:0") {
+            let _ = sock.set_broadcast(true);
+            for addr in bcast_targets.iter().chain(unicast_targets.iter()) {
+                let _ = sock.send_to(&bytes, addr);
+            }
+        }
     }
 }
