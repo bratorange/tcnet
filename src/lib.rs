@@ -148,6 +148,7 @@ pub mod domain;
 mod node;
 pub mod proto;
 pub mod protocol;
+pub mod runtime;
 pub mod session;
 pub mod spec_version;
 #[cfg(test)]
