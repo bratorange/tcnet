@@ -22,6 +22,7 @@ pub mod app_specific;
 pub mod chunked;
 pub mod control;
 pub mod keyboard;
+pub mod request;
 pub mod text;
 pub mod time_sync;
 
@@ -31,6 +32,7 @@ pub use app_specific::{
 pub use chunked::{AcceptOutcome, ChunkedFrame, ChunkedPayload, MismatchReason};
 pub use control::{ControlPath, SourceId};
 pub use keyboard::KeyPress;
+pub use request::{DEFAULT_REQUEST_TIMEOUT, Pending, PendingSlot, RequestError, pending};
 pub use text::TextMessage;
 pub use time_sync::{
     ClockOffset, DEFAULT_MAX_REPLY_AGE, PendingTimeSync, TimeSyncError, TimeSyncReply,
