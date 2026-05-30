@@ -24,11 +24,13 @@ pub mod channel;
 pub mod error;
 pub mod memory;
 pub mod pool;
+pub mod udp;
 
 pub use channel::{Channel, ChannelConfig, ChannelStatus, OverflowPolicy};
 pub use error::TransportError;
 pub use memory::{MemoryDatagram, MemoryTransport};
 pub use pool::{BufferPool, PoolBuf, SLOT_SIZE};
+pub use udp::{DEFAULT_CHANNEL_PORTS, UdpTransport};
 
 use std::net::SocketAddrV4;
 
