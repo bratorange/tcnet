@@ -42,3 +42,5 @@ crossbeam-queue = "0.3.12"
 
 [dev-dependencies]
 serial_test = "3"
+
+[workspace]
