@@ -1019,6 +1019,38 @@ pub struct TextData {
     text_data: Vec<u8>, // String Text Data (ASCII TEXT)
 }
 
+impl TextData {
+    /// Build an outgoing initial Text packet (step = 0).
+    pub fn new_initial(bytes: Vec<u8>) -> Self {
+        Self {
+            step: 0,
+            _reserved0: ReservedData::default(),
+            data_size: bytes.len() as u32,
+            _reserved1: ReservedData::default(),
+            text_data: bytes,
+        }
+    }
+
+    /// Build an outgoing response Text packet (step = 1).
+    pub fn new_response(bytes: Vec<u8>) -> Self {
+        Self {
+            step: 1,
+            _reserved0: ReservedData::default(),
+            data_size: bytes.len() as u32,
+            _reserved1: ReservedData::default(),
+            text_data: bytes,
+        }
+    }
+
+    pub fn step(&self) -> u8 {
+        self.step
+    }
+
+    pub fn text_data(&self) -> &[u8] {
+        &self.text_data
+    }
+}
+
 /// Keyboard input passthrough (message type 132).
 ///
 /// Two bytes of HEX-ASCII keyboard scan-code data.
@@ -1030,6 +1062,24 @@ pub struct KeyboardData {
     data_size: u32, // Total Data Size
     _reserved2: ReservedData<12>, // RESERVED
     keyboard_data: [u8; 2],      // Keyboard Data (HEX ASCII Code)
+}
+
+impl KeyboardData {
+    /// Build a Keyboard packet from a 2-byte HEX-ASCII scan code.
+    pub fn new(scan_code: [u8; 2]) -> Self {
+        Self {
+            _reserved0: ReservedData::default(),
+            _reserved1: ReservedData::default(),
+            data_size: 2,
+            _reserved2: ReservedData::default(),
+            keyboard_data: scan_code,
+        }
+    }
+
+    /// The 2-byte HEX-ASCII scan code.
+    pub fn scan_code(&self) -> [u8; 2] {
+        self.keyboard_data
+    }
 }
 
 /// Periodic per-layer playback metrics (message type 200, data type 2).
