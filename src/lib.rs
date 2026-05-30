@@ -30,21 +30,20 @@
 //! ```no_run
 //! use std::thread::sleep;
 //! use std::time::Duration;
-//! use tcnet::{ApplicationConfig, TCNetClient};
+//! use tcnet::api::{NodeBuilder, Slave};
+//! use tcnet::V3_6;
 //!
-//! let config = ApplicationConfig::default();
-//! let mut client = TCNetClient::new(config);
+//! let mut node = NodeBuilder::<Slave, V3_6>::new()
+//!     .with_local_ip([127, 0, 0, 1].into())
+//!     .spawn()
+//!     .expect("node spawn");
 //!
-//! // Wait for a foreign DJ controller to be discovered, then read its state.
 //! loop {
-//!     // Materialise the snapshot into an owned Vec so that the &mut borrow
-//!     // active_nodes() returns is released before we re-borrow `client` to
-//!     // call get_controller_view().
-//!     let nodes: Vec<_> = client.active_nodes().to_vec();
-//!     for node in &nodes {
-//!         if node.has_dj_controller {
-//!             if let Some(mut view) = client.get_controller_view(node.address) {
-//!                 for (i, layer) in view.get_layers().iter().enumerate() {
+//!     let snap = node.snapshot();
+//!     for peer in &snap.peers {
+//!         if peer.has_dj_controller {
+//!             if let Some(layers) = node.layers_for(peer.address) {
+//!                 for (i, layer) in layers.iter().enumerate() {
 //!                     println!("L{}: {:?} @ {:.1} BPM", i + 1, layer.state, layer.bpm.as_f32());
 //!                 }
 //!             }
@@ -247,7 +246,7 @@ impl From<&ForeignNode> for ForeignNodeInfo {
 ///   this process's playback state.
 ///
 /// Both can be used at the same time.
-pub struct TCNetClient {
+pub(crate) struct TCNetClient {
     _runtime: Runtime,
     dispatcher: Arc<Dispatcher>,
     /// Wait-free atomic snapshot of the published discovered-nodes vector.

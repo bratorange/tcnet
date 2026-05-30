@@ -15,50 +15,44 @@ use log::trace;
 use std::net::Ipv4Addr;
 use std::thread::sleep;
 use std::time::Duration;
-use tcnet::{ApplicationConfig, DjControllerView, TCNetClient};
+use tcnet::api::{NodeBuilder, Slave};
+use tcnet::{ApplicationConfig, LayerSnapshot, MixerSnapshot, V3_6};
 
 #[derive(Parser)]
 struct Args {
     binding_ip: Ipv4Addr,
 }
 
-fn print_state(view: &mut DjControllerView) {
-    // get_layers and get_mixer each reborrow view mutably, so we use separate blocks.
-    {
-        let layers = view.get_layers();
-        let active: Vec<_> = layers
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| l.track_id != 0)
-            .collect();
+fn print_state(layers: &[LayerSnapshot], mixer: &MixerSnapshot) {
+    let active: Vec<_> = layers
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.track_id != 0)
+        .collect();
 
-        if active.is_empty() {
-            println!("[layers] no tracks loaded");
-        } else {
-            for (i, layer) in active {
-                println!(
-                    "[L{}] {:?} | {:>6.1} bpm | {:>5.1}% | pos {:>8}ms / {:>8}ms | \"{}\" — \"{}\"",
-                    i + 1,
-                    layer.state,
-                    layer.bpm.as_f32(),
-                    layer.speed.as_percent(),
-                    layer.current_time_ms,
-                    layer.total_time_ms,
-                    layer.artist,
-                    layer.title,
-                );
-            }
+    if active.is_empty() {
+        println!("[layers] no tracks loaded");
+    } else {
+        for (i, layer) in active {
+            println!(
+                "[L{}] {:?} | {:>6.1} bpm | {:>5.1}% | pos {:>8}ms / {:>8}ms | \"{}\" — \"{}\"",
+                i + 1,
+                layer.state,
+                layer.bpm.as_f32(),
+                layer.speed.as_percent(),
+                layer.current_time_ms,
+                layer.total_time_ms,
+                layer.artist,
+                layer.title,
+            );
         }
     }
 
-    {
-        let m = view.get_mixer();
-        if m.mixer_id != 0 {
-            println!(
-                "[mixer] master={:3} fader={:3} xfader={:3}",
-                m.master_audio_level, m.master_fader_level, m.crossfader
-            );
-        }
+    if mixer.mixer_id != 0 {
+        println!(
+            "[mixer] master={:3} fader={:3} xfader={:3}",
+            mixer.master_audio_level, mixer.master_fader_level, mixer.crossfader
+        );
     }
 
     println!();
@@ -72,34 +66,38 @@ fn main() {
     let mut config = ApplicationConfig::default();
     config.address.set_ip(bind_address);
 
-    let mut client = TCNetClient::new(config);
+    let mut node = NodeBuilder::<Slave, V3_6>::new()
+        .with_config(config)
+        .with_local_ip(bind_address)
+        .spawn()
+        .expect("node spawn");
 
     // Wait until a foreign node advertising a DJ controller is discovered.
-    let mut view = loop {
+    let peer_addr = loop {
         sleep(Duration::from_secs(1));
 
-        let nodes = client.active_nodes().to_vec();
-        println!("Discovered {} node(s)…", nodes.len());
-        for n in &nodes {
+        let snap = node.snapshot();
+        println!("Discovered {} node(s)…", snap.peers.len());
+        for p in &snap.peers {
             println!(
                 "  {} | has_dj_controller={}",
-                n.address, n.has_dj_controller
+                p.address, p.has_dj_controller
             );
         }
 
-        if let Some(node) = nodes.iter().find(|n| n.has_dj_controller)
-            && let Some(view) = client.get_controller_view(node.address)
-        {
-            println!("Got DjControllerView for {}\n", node.address);
-            break view;
+        if let Some(p) = snap.peers.iter().find(|n| n.has_dj_controller) {
+            println!("Found DJ controller at {}\n", p.address);
+            break p.address;
         }
     };
 
     loop {
-        let nodes = client.active_nodes().to_vec();
-        println!("Discovered {} node(s)…", nodes.len());
+        let snap = node.snapshot();
+        println!("Discovered {} node(s)…", snap.peers.len());
         sleep(Duration::from_millis(500));
-        print_state(&mut view);
-        trace!("{:?}", view.get_mixer());
+        let layers = node.layers_for(peer_addr).unwrap_or_default();
+        let mixer = node.mixer_for(peer_addr).unwrap_or_default();
+        print_state(&layers, &mixer);
+        trace!("{:?}", mixer);
     }
 }
