@@ -144,6 +144,7 @@ use tokio::runtime::Runtime;
 use tokio::sync::RwLock;
 
 pub mod active_node;
+pub mod domain;
 mod node;
 pub mod proto;
 pub mod protocol;
