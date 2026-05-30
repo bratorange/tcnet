@@ -19,9 +19,11 @@
 //! * `error_notif` — `ErrorNotification` routing (phase 5.7).
 
 pub mod chunked;
+pub mod control;
 pub mod time_sync;
 
 pub use chunked::{AcceptOutcome, ChunkedFrame, ChunkedPayload, MismatchReason};
+pub use control::{ControlPath, SourceId};
 pub use time_sync::{
     ClockOffset, DEFAULT_MAX_REPLY_AGE, PendingTimeSync, TimeSyncError, TimeSyncReply,
 };

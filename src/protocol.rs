@@ -970,6 +970,41 @@ pub struct ControlData {
     control_path: Vec<u8>, // String with Control Path (ASCII TEXT)
 }
 
+impl ControlData {
+    /// Build an outgoing initial (`step = 0`) Control message
+    /// carrying `path_bytes`.
+    pub fn new_initial(path_bytes: Vec<u8>) -> Self {
+        Self {
+            step: 0,
+            _reserved0: ReservedData::default(),
+            data_size: path_bytes.len() as u32,
+            _reserved1: ReservedData::default(),
+            control_path: path_bytes,
+        }
+    }
+
+    /// Build an outgoing response (`step = 1`) Control message.
+    pub fn new_response(path_bytes: Vec<u8>) -> Self {
+        Self {
+            step: 1,
+            _reserved0: ReservedData::default(),
+            data_size: path_bytes.len() as u32,
+            _reserved1: ReservedData::default(),
+            control_path: path_bytes,
+        }
+    }
+
+    /// Initiator vs. response (`0` / `1` per spec).
+    pub fn step(&self) -> u8 {
+        self.step
+    }
+
+    /// The carried path bytes (ASCII).
+    pub fn control_path(&self) -> &[u8] {
+        &self.control_path
+    }
+}
+
 /// Text payload (message type 128).
 ///
 /// Carries an arbitrary ASCII text string of length `data_size`.
