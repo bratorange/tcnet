@@ -1,6 +1,6 @@
 [package]
 name = "tcnet"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 authors = ["Julius Schmitt dev@jsch.in"]
 description = "Rust implementation of the TCNet protocol."
