@@ -145,6 +145,7 @@ use tokio::sync::RwLock;
 
 pub mod active_node;
 mod node;
+pub mod proto;
 pub mod protocol;
 pub mod session;
 pub mod spec_version;
