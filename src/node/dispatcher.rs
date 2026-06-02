@@ -10,7 +10,7 @@ use crate::node::{ApplicationConfig, ForeignNode};
 use crate::protocol::{LayerId, NodeType, RequestDataType};
 use deku::DekuContainerWrite;
 use getifs::best_local_ipv4_addrs;
-use log::{error, info, trace, warn};
+use log::{debug, error, info, trace, warn};
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
@@ -267,7 +267,7 @@ async fn election_driver(dispatcher: Arc<Dispatcher>) {
             });
         }
 
-        for (addr, fn_arc) in map.iter() {
+        for (_key, fn_arc) in map.iter() {
             let cfg = fn_arc.config();
             if matches!(cfg.node_type, NodeType::Master | NodeType::Auto) {
                 // Peer uptime isn't carried per-packet in V3.5.1B; we
@@ -277,7 +277,10 @@ async fn election_driver(dispatcher: Arc<Dispatcher>) {
                 let observed = now_secs.saturating_sub(last_seen).min(43_200) as u32;
                 candidates.push(crate::session::ElectionCandidate {
                     node_id: cfg.node_id,
-                    addr: *addr,
+                    // Use the peer's announced unicast address from its
+                    // OptIn body, NOT the HashMap key (which is the
+                    // recv-side source port).
+                    addr: fn_arc.address(),
                     uptime_secs: observed,
                     announced_at: now,
                 });
@@ -289,30 +292,85 @@ async fn election_driver(dispatcher: Arc<Dispatcher>) {
     }
 }
 
-/// Periodically initiate a TimeSync(step=0) handshake against one of
-/// the active peers.  Round-robins across the peer set so every peer
-/// gets a fresh clock-offset measurement every `PEER_COUNT * 5 s`.
+/// Tick interval for the TimeSync initiator. The short tick + per-peer
+/// cooldown lets short-lived "ghost" peers (e.g. the ProDJ Link Bridge's
+/// transient sockets, observed at ~5–10 s lifetimes) get serviced
+/// before they vanish.
+const TIME_SYNC_TICK: Duration = Duration::from_millis(1000);
+/// Minimum spacing between consecutive step=0 packets to the same peer.
+const TIME_SYNC_PER_PEER_COOLDOWN: Duration = Duration::from_secs(5);
+
+/// Pick the freshest peer whose cooldown has elapsed.
+///
+/// `peers` is `(announced_addr, last_seen_secs)` tuples (`last_seen` =
+/// the wall-clock epoch seconds of the peer's most recent observation,
+/// as tracked by `ForeignNode.touch`). `last_sent` records the
+/// monotonic instant of our most recent step=0 to each peer. Returns
+/// `None` if every peer is still in cooldown.
+fn pick_time_sync_target(
+    peers: &[(SocketAddrV4, u64)],
+    last_sent: &HashMap<SocketAddrV4, std::time::Instant>,
+    now: std::time::Instant,
+    cooldown: Duration,
+) -> Option<SocketAddrV4> {
+    let mut sorted: Vec<&(SocketAddrV4, u64)> = peers.iter().collect();
+    sorted.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted
+        .into_iter()
+        .find(|(addr, _)| match last_sent.get(addr) {
+            None => true,
+            Some(t) => now.duration_since(*t) >= cooldown,
+        })
+        .map(|(addr, _)| *addr)
+}
+
+/// Periodically initiate a TimeSync(step=0) handshake against an
+/// active peer. Ticks every [`TIME_SYNC_TICK`]; selection prefers the
+/// most-recently-seen peer so short-lived peers get a chance to reply
+/// before they go away; per-peer cooldown
+/// ([`TIME_SYNC_PER_PEER_COOLDOWN`]) keeps us from spamming a single
+/// peer.
 async fn time_sync_initiator(dispatcher: Arc<Dispatcher>) {
-    let mut tick = interval(Duration::from_secs(5));
-    let mut round_robin: usize = 0;
+    let mut tick = interval(TIME_SYNC_TICK);
+    let mut last_sent: HashMap<SocketAddrV4, std::time::Instant> = HashMap::new();
     loop {
         tick.tick().await;
 
+        let now = std::time::Instant::now();
+
         // Drop slots older than the 500 ms reply window so we don't
         // leak entries when a peer goes silent mid-handshake.
-        dispatcher.pending_time_sync.sweep_stale(
-            std::time::Instant::now(),
-            crate::proto::DEFAULT_MAX_REPLY_AGE,
-        );
+        dispatcher
+            .pending_time_sync
+            .sweep_stale(now, crate::proto::DEFAULT_MAX_REPLY_AGE);
 
-        // Pick the next peer round-robin.
+        // Target the peer's announced unicast address (`fn_arc.address()`
+        // from its OptIn body), NOT the HashMap key (which is the
+        // recv-side address — for peers like the ProDJ Link Bridge
+        // those are broadcast ports the peer never listens on for
+        // unicast TimeSync requests).
         let map = dispatcher.state.load_full();
-        let addrs: Vec<SocketAddrV4> = map.keys().copied().collect();
-        if addrs.is_empty() {
+        let peers: Vec<(SocketAddrV4, u64)> = map
+            .values()
+            .map(|n| (n.address(), n.last_seen()))
+            .collect();
+        if peers.is_empty() {
             continue;
         }
-        round_robin = (round_robin + 1) % addrs.len();
-        let target = addrs[round_robin];
+
+        // Garbage-collect cooldown entries for peers we no longer see.
+        let live: HashSet<SocketAddrV4> = peers.iter().map(|(a, _)| *a).collect();
+        last_sent.retain(|k, _| live.contains(k));
+
+        let target = match pick_time_sync_target(
+            &peers,
+            &last_sent,
+            now,
+            TIME_SYNC_PER_PEER_COOLDOWN,
+        ) {
+            Some(t) => t,
+            None => continue, // every peer still in cooldown
+        };
 
         let local_ts_us = current_microseconds();
         let unicast_port = dispatcher.actual_unicast_port.load(Ordering::Relaxed);
@@ -323,10 +381,15 @@ async fn time_sync_initiator(dispatcher: Arc<Dispatcher>) {
         // can't beat the insert.
         let pending = crate::proto::PendingTimeSync {
             our_send_ts_us: local_ts_us,
-            sent_at: std::time::Instant::now(),
+            sent_at: now,
             peer: target,
         };
         dispatcher.pending_time_sync.insert(target, pending);
+        last_sent.insert(target, now);
+        debug!(
+            "TimeSync: sending step=0 to {} (our_ts_us={}, our_listener={})",
+            target, local_ts_us, unicast_port
+        );
 
         let _ = dispatcher.outgoing_tx.try_send(OutgoingRequest {
             destination: target,
@@ -394,15 +457,24 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
                             OptIn(opt_in_data) => {
                                 let node_config =
                                     node_config_from_opt_in(src_ip, &packet.header, opt_in_data);
+                                // Key by the announced unicast address from
+                                // the OptIn body, NOT the recv source port.
+                                // A peer that broadcasts OptIns from multiple
+                                // source ports (e.g. the Pioneer ProDJ Link
+                                // Bridge emits from 60002 + an ephemeral
+                                // fallback) collapses into one entry per
+                                // announced address — see
+                                // docs/BRIDGE_INTEROP_REPORT.md.
+                                let key = node_config.address;
                                 let map = dispatcher.state.load_full();
-                                if let Some(node) = map.get(&src_addr) {
+                                if let Some(node) = map.get(&key) {
                                     node.touch(timestamp_secs());
                                     node.set_address(node_config.address);
                                     node.set_config(node_config);
                                 } else {
                                     let mut new_map = (*map).clone();
                                     new_map.insert(
-                                        src_addr,
+                                        key,
                                         Arc::new(ForeignNode::new(
                                             node_config.address,
                                             node_config,
@@ -509,9 +581,35 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
                                             data: Data::TimeSync(reply),
                                         });
                                 } else if ts.step() == 1 {
-                                    if let Some(pending) =
-                                        dispatcher.pending_time_sync.remove(&src_addr)
-                                    {
+                                    debug!(
+                                        "TimeSync: received step=1 from src={} body_port={} echoed_ts={}",
+                                        src_addr,
+                                        ts.node_listener_port(),
+                                        ts.remote_timestamp()
+                                    );
+                                    // Match the reply to its pending slot.
+                                    // Spec page 8 puts the responder's
+                                    // listener port in the reply body, which
+                                    // is the peer's announced unicast — the
+                                    // same address we sent the step=0 to. The
+                                    // recv src_addr can differ when the peer
+                                    // unicasts the reply from its broadcast
+                                    // socket (observed with the Pioneer ProDJ
+                                    // Link Bridge: reply src is :60002 even
+                                    // though the announced unicast is :65076).
+                                    let body_peer = SocketAddrV4::new(
+                                        src_ip,
+                                        ts.node_listener_port(),
+                                    );
+                                    let pending = dispatcher
+                                        .pending_time_sync
+                                        .remove(&body_peer)
+                                        .or_else(|| {
+                                            dispatcher
+                                                .pending_time_sync
+                                                .remove(&src_addr)
+                                        });
+                                    if let Some(pending) = pending {
                                         let reply = crate::proto::TimeSyncReply {
                                             echoed_our_ts_us: ts.remote_timestamp(),
                                             their_listener_port: ts.node_listener_port(),
@@ -521,18 +619,24 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
                                             Ok(offset) => {
                                                 trace!(
                                                     "TimeSync: peer {} rtt={:?} delay={:?}",
-                                                    src_addr,
+                                                    body_peer,
                                                     offset.round_trip,
                                                     offset.one_way_delay,
                                                 );
+                                                // Index the resolved offset
+                                                // by the announced peer address
+                                                // so `clock_offset_for(peer)`
+                                                // resolves with the address
+                                                // callers actually have a
+                                                // reference to.
                                                 dispatcher
                                                     .clock_offsets
-                                                    .insert(src_addr, offset);
+                                                    .insert(body_peer, offset);
                                             }
                                             Err(e) => {
                                                 trace!(
                                                     "TimeSync reply from {}: rejected {:?}",
-                                                    src_addr, e,
+                                                    body_peer, e,
                                                 );
                                             }
                                         }
@@ -915,4 +1019,78 @@ pub fn timestamp_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .expect("time should go forward");
     since_the_epoch.as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+    use std::time::Instant;
+
+    fn addr(port: u16) -> SocketAddrV4 {
+        SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)
+    }
+
+    #[test]
+    fn pick_time_sync_target_returns_none_for_empty_peer_set() {
+        let now = Instant::now();
+        let cooldown = Duration::from_secs(5);
+        assert!(pick_time_sync_target(&[], &HashMap::new(), now, cooldown).is_none());
+    }
+
+    #[test]
+    fn pick_time_sync_target_picks_freshest_peer_when_no_history() {
+        let now = Instant::now();
+        let cooldown = Duration::from_secs(5);
+        let peers = vec![
+            (addr(60010), 100u64), // oldest last_seen
+            (addr(60020), 300u64), // freshest
+            (addr(60030), 200u64),
+        ];
+        let picked =
+            pick_time_sync_target(&peers, &HashMap::new(), now, cooldown);
+        assert_eq!(picked, Some(addr(60020)));
+    }
+
+    #[test]
+    fn pick_time_sync_target_skips_peer_in_cooldown() {
+        let now = Instant::now();
+        let cooldown = Duration::from_secs(5);
+        // Freshest peer was hit 1 s ago — still in cooldown. Second-
+        // freshest peer was never hit — should be chosen.
+        let peers = vec![
+            (addr(60010), 100u64),
+            (addr(60020), 300u64), // freshest, but in cooldown
+            (addr(60030), 200u64), // second-freshest, no cooldown
+        ];
+        let mut last_sent = HashMap::new();
+        last_sent.insert(addr(60020), now - Duration::from_secs(1));
+        let picked = pick_time_sync_target(&peers, &last_sent, now, cooldown);
+        assert_eq!(picked, Some(addr(60030)));
+    }
+
+    #[test]
+    fn pick_time_sync_target_returns_none_when_all_in_cooldown() {
+        let now = Instant::now();
+        let cooldown = Duration::from_secs(5);
+        let peers =
+            vec![(addr(60010), 100u64), (addr(60020), 300u64)];
+        let mut last_sent = HashMap::new();
+        last_sent.insert(addr(60010), now - Duration::from_secs(1));
+        last_sent.insert(addr(60020), now - Duration::from_secs(2));
+        let picked = pick_time_sync_target(&peers, &last_sent, now, cooldown);
+        assert!(picked.is_none());
+    }
+
+    #[test]
+    fn pick_time_sync_target_picks_again_after_cooldown_elapses() {
+        let now = Instant::now();
+        let cooldown = Duration::from_secs(5);
+        let peers = vec![(addr(60010), 100u64)];
+        let mut last_sent = HashMap::new();
+        // Last sent exactly `cooldown` ago — boundary is inclusive.
+        last_sent.insert(addr(60010), now - cooldown);
+        let picked = pick_time_sync_target(&peers, &last_sent, now, cooldown);
+        assert_eq!(picked, Some(addr(60010)));
+    }
 }
