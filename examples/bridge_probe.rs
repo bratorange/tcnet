@@ -421,9 +421,7 @@ fn main() -> ExitCode {
         time_sync_verdict,
         election_verdict,
         controller_verdict,
-    ]
-    .iter()
-    .any(|v| *v == Verdict::Fail);
+    ].contains(&Verdict::Fail);
 
     if any_fail {
         ExitCode::from(1)

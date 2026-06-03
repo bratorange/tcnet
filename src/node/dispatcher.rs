@@ -321,7 +321,7 @@ fn pick_time_sync_target(
     cooldown: Duration,
 ) -> Option<SocketAddrV4> {
     let mut sorted: Vec<&(SocketAddrV4, u64)> = peers.iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted.sort_by_key(|p| std::cmp::Reverse(p.1));
     sorted
         .into_iter()
         .find(|(addr, _)| match last_sent.get(addr) {
@@ -406,7 +406,7 @@ fn current_microseconds() -> u32 {
     // Take the microseconds portion of the current second so the
     // value fits in u32 and rolls naturally each second — spec page
     // 4 describes `timestamp` as a within-second µs counter.
-    (now.subsec_micros()) as u32
+    now.subsec_micros()
 }
 
 fn is_dj_packet(data: &Data) -> bool {

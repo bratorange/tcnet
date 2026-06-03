@@ -1,4 +1,4 @@
-//! Cross-version FLAME matrix test (ARCHITECTURE.md §12 + plan phase 9).
+//! Cross-version FLAME matrix test.
 //!
 //! For every `(local, remote)` SpecVersion pair in our marker set,
 //! check the FLAME inclusion machinery agrees with the runtime
@@ -6,13 +6,12 @@
 //! compile-time `IncludesFlame<F>` trait impls and the runtime
 //! tag derived from `INTRODUCED_AT` constants don't drift apart as
 //! versions get added.
-//!
-//! Golden-vector pcap replay (the other half of phase 9) is omitted
-//! — capturing a 30-second bridge session needs the live bridge
-//! running, which isn't in CI scope; the manual smoke check lives
-//! in the plan's bridge-integration workflow.
 
 use tcnet::spec_version::*;
+
+/// A shipped FLAME paired with its label, introduction version, and a
+/// runtime `PeerVersion::includes` predicate.
+type FlameIntro = (&'static str, (u8, u8, u8), fn(PeerVersion) -> bool);
 
 /// Every SpecVersion we ship.
 fn all_versions() -> Vec<(&'static str, (u8, u8, u8))> {
@@ -37,7 +36,7 @@ fn all_versions() -> Vec<(&'static str, (u8, u8, u8))> {
 
 /// Every Flame we ship, paired with a "test function" that checks
 /// `PeerVersion::includes::<F>()`.
-fn flame_introductions() -> Vec<(&'static str, (u8, u8, u8), fn(PeerVersion) -> bool)> {
+fn flame_introductions() -> Vec<FlameIntro> {
     vec![
         (
             BaseFlame::LABEL,

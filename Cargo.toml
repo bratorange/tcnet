@@ -10,9 +10,9 @@ documentation = "https://docs.rs/tcnet"
 homepage = "https://github.com/bratorange/tcnet"
 readme = "README.md"
 keywords = ["VJ", "Syncronization", "DJ"]
-# Keep the spec PDFs (and the architecture design doc) out of the
-# crates.io tarball — they're for the GitHub source tree only.
-exclude = ["docs/spec/*", "ARCHITECTURE.md"]
+# Keep the spec PDFs out of the crates.io tarball — they're for the
+# GitHub source tree only.
+exclude = ["docs/spec/*"]
 
 [lib]
 name = "tcnet"
@@ -38,6 +38,10 @@ kanal = "0.1.1"
 triple_buffer = "9.0.0"
 serde = { version = "1", features = ["derive"] }
 arc-swap = "1.9.1"
+# Load-bearing despite having no direct `use`: this is the only crate that
+# turns on `crossbeam-utils/std`, which `triple_buffer` needs for correct
+# lock-free snapshot delivery. Dropping it makes the networking tests hang.
+# Tooling flags it as an unused crate — keep it anyway.
 crossbeam-queue = "0.3.12"
 
 [dev-dependencies]

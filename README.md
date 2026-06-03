@@ -11,8 +11,9 @@ setting.  Expect breaking API changes between minor versions.
 
 ## What you get
 
-A single typed handle, `Node<R: Role, V: SpecVersion>`, that hides all
-the wire / transport / session / runtime plumbing and surfaces:
+A single typed handle, `Node<R: Role, V: SpecVersion>`, that hides the
+wire encoding, socket I/O, peer discovery and session bookkeeping and
+surfaces:
 
 ```rust
 use tcnet::api::{NodeBuilder, Slave};
@@ -67,30 +68,15 @@ Every spec-defined runtime behaviour:
 - Request / Response for SmallWaveform, BigWaveform, BeatGrid, Cue
   Data, Artwork File (multi-packet reassembly built in;
   `ErrorNotification(014, EMPTY)` reply when cache is empty)
-- Control / Text / Keyboard / AppSpecific (msg types 30 + 213)
-  wire parsing and typed builders
-
-Spec compliance audit at [`docs/SPEC_AUDIT_V3_5_1B.md`](docs/SPEC_AUDIT_V3_5_1B.md).
+- AppSpecific (msg types 30 + 213) wire parsing
 
 ## Architecture
 
-Six lock-free internal layers (no `Mutex` / `RwLock` anywhere — the peer
-map is `ArcSwap<HashMap<…>>`, per-peer state uses interior-mutable
-atomics + `ArcSwap` fields, the session task drains a
-`crossbeam_queue::ArrayQueue` of typed commands):
+Lock-free internals: no `Mutex` / `RwLock` anywhere.  The peer map is an
+`ArcSwap<HashMap<…>>`, per-peer state uses interior-mutable atomics and
+`ArcSwap` fields, and outbound traffic flows over bounded `kanal`
+channels drained by the dispatcher task.
 
-```
-api::Node<R, V>          ← typed public surface
-  │
-  ├─ session ────────────  single-actor peer map + election FSM
-  ├─ proto ──────────────  TimeSync, Control, AppSpecific, Pending<T>, ChunkedFrame
-  ├─ domain ─────────────  per-layer Option-typed snapshot + timestamp-ordered writer
-  ├─ runtime ────────────  drift-corrected Ticker
-  └─ transport ──────────  UdpTransport / MemoryTransport
-                            UDP 60000 / 60001 / 60002 / 65023+
-```
-
-See [`ARCHITECTURE.md`](ARCHITECTURE.md) for design rationale.
 
 ## Running the example
 
@@ -107,10 +93,9 @@ interface.
 cargo test
 ```
 
-154 lib tests + 4 doctests + 4 integration tests.  The 11 integration
-tests under `src/tests.rs` bind the spec ports `60000-60002 / 65023`
-on `127.0.0.1` — make sure no other TCNet node is running on the same
-host before invoking the suite.
+The integration tests under `src/tests.rs` bind the spec ports
+`60000-60002 / 65023` on `127.0.0.1` — make sure no other TCNet node is
+running on the same host before invoking the suite.
 
 ## Spec
 

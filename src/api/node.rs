@@ -74,8 +74,6 @@ pub enum NodeError {
     /// [`NodeBuilder::spawn`](crate::api::NodeBuilder::spawn) couldn't
     /// bring the runtime / dispatcher up.
     SpawnFailed { reason: String },
-    /// `Node::leave` couldn't broadcast OptOut.
-    LeaveFailed,
     /// A request (waveform / beat-grid / cue) did not resolve. Raised
     /// when the 5 s deadline elapses or the request channel closed. A
     /// peer that has no data answers with `ErrorNotification(014, EMPTY)`,
@@ -91,7 +89,6 @@ impl std::fmt::Display for NodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::SpawnFailed { reason } => write!(f, "NodeBuilder::spawn failed: {}", reason),
-            Self::LeaveFailed => f.write_str("Node::leave failed"),
             Self::RequestTimeout => f.write_str("request timed out"),
             Self::PeerHasNoController { addr } => {
                 write!(f, "peer {} has no DjController yet", addr)

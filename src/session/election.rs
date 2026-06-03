@@ -69,10 +69,11 @@ pub struct ElectionWinner {
 }
 
 /// Current state of the local-perspective election machine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ElectionState {
     /// No master observed; we're not contending.  Default for `Slave`
     /// / `Repeater` local nodes.
+    #[default]
     Watching,
     /// We (local) are running as `Auto` and a contender is in play.
     /// `since` is when we entered this state — used to break ties
@@ -80,12 +81,6 @@ pub enum ElectionState {
     Contending { since: Instant },
     /// A clear winner has been chosen.
     Elected(ElectionWinner),
-}
-
-impl Default for ElectionState {
-    fn default() -> Self {
-        Self::Watching
-    }
 }
 
 /// The election state machine. Driven by the dispatcher's election driver.
@@ -118,11 +113,10 @@ impl Election {
 
         // Already elected the same node — keep elected_at stable so
         // downstream consumers can detect new winners by ts delta.
-        if let ElectionState::Elected(existing) = self.state {
-            if existing.node_id == winner.node_id {
+        if let ElectionState::Elected(existing) = self.state
+            && existing.node_id == winner.node_id {
                 return self.state;
             }
-        }
 
         self.state = ElectionState::Elected(ElectionWinner {
             node_id: winner.node_id,
@@ -133,8 +127,7 @@ impl Election {
     }
 
     /// The election round was lost — a contender beat us.  Local Auto
-    /// nodes use this to step down (the API surface will fall back to
-    /// `Node<Slave>` in phase 8).
+    /// nodes use this to step down.
     pub fn stand_down(&mut self) {
         self.state = ElectionState::Watching;
     }

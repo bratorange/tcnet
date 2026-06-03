@@ -57,23 +57,12 @@ pub struct HotCue {
 
 /// Per-layer cue state owned by an [`ActiveDJNode`]. Slot 0 is the [CUE]
 /// memory marker; slots 1..=8 are the A–H hot-cue pads.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct LayerCueState {
     cue_marker: Option<HotCue>,
     hot_cues: [Option<HotCue>; 8],
     loop_in_ms: u32,
     loop_out_ms: u32,
-}
-
-impl Default for LayerCueState {
-    fn default() -> Self {
-        Self {
-            cue_marker: None,
-            hot_cues: [None; 8],
-            loop_in_ms: 0,
-            loop_out_ms: 0,
-        }
-    }
 }
 
 impl LayerCueState {
@@ -115,10 +104,11 @@ impl Default for ActiveNodeInner {
     fn default() -> Self {
         Self {
             layers: std::array::from_fn(|_| {
-                let mut snap = LayerSnapshot::default();
-                snap.bpm = Bpm((120.0 * 100.0) as u32);
-                snap.speed = Speed::NORMAL;
-                ArcSwap::from_pointee(snap)
+                ArcSwap::from_pointee(LayerSnapshot {
+                    bpm: Bpm((120.0 * 100.0) as u32),
+                    speed: Speed::NORMAL,
+                    ..Default::default()
+                })
             }),
             cue_states: std::array::from_fn(|_| {
                 ArcSwap::from_pointee(LayerCueState::default())
@@ -165,7 +155,7 @@ impl ActiveNodeInner {
         F: FnMut(&mut LayerCueState),
     {
         self.cue_states[id.index()].rcu(|cur| {
-            let mut new = (**cur).clone();
+            let mut new = **cur;
             f(&mut new);
             Arc::new(new)
         });

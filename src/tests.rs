@@ -398,8 +398,8 @@ fn test_cdj_play_session() {
         assert_eq!(l2.source, 2, "L2 source");
 
         // L3–LC — nothing loaded
-        for i in 2..8 {
-            assert_eq!(layers[i].track_id, 0, "layer {} should have no track", i);
+        for (i, layer) in layers.iter().enumerate().skip(2) {
+            assert_eq!(layer.track_id, 0, "layer {} should have no track", i);
         }
     }
 
@@ -427,8 +427,10 @@ fn test_request_response() {
     let _ = env_logger::try_init();
 
     // Start a Master-type TCNetClient on 127.0.0.1.
-    let mut node_config = ApplicationConfig::default();
-    node_config.node_type = NodeType::Master;
+    let node_config = ApplicationConfig {
+        node_type: NodeType::Master,
+        ..Default::default()
+    };
     let client = TCNetClient::new(node_config);
     sleep(Duration::from_millis(400));
 
@@ -474,32 +476,30 @@ fn test_request_response() {
     let recv_packets = |expected: usize, want: RequestDataType|
         -> Vec<crate::node::tcnet_packet::Data> {
         use crate::node::tcnet_packet::Data as D;
-        let matches_want = |d: &D| match (d, want) {
-            (D::Metrics(_), RequestDataType::MetricsData) => true,
-            (D::Meta(_), RequestDataType::MetaData) => true,
-            (D::BeatGrid(_), RequestDataType::BeatGridData) => true,
-            (D::Cue(_), RequestDataType::CueData) => true,
-            (D::SmallWaveform(_), RequestDataType::SmallWaveformData) => true,
-            (D::BigWaveform(_), RequestDataType::LargeWaveformData) => true,
-            (D::ArtworkFile(_), RequestDataType::LowResArtworkFile) => true,
-            (D::Mixer(_), RequestDataType::MixerData) => true,
-            _ => false,
+        let matches_want = |d: &D| {
+            matches!(
+                (d, want),
+                (D::Metrics(_), RequestDataType::MetricsData)
+                    | (D::Meta(_), RequestDataType::MetaData)
+                    | (D::BeatGrid(_), RequestDataType::BeatGridData)
+                    | (D::Cue(_), RequestDataType::CueData)
+                    | (D::SmallWaveform(_), RequestDataType::SmallWaveformData)
+                    | (D::BigWaveform(_), RequestDataType::LargeWaveformData)
+                    | (D::ArtworkFile(_), RequestDataType::LowResArtworkFile)
+                    | (D::Mixer(_), RequestDataType::MixerData)
+            )
         };
         let mut collected = Vec::new();
         let mut buf = [0u8; 8192];
-        loop {
-            match viewer.recv_from(&mut buf) {
-                Ok((size, _)) => {
-                    if let Ok(pkt) = Packet::deserialize_packet(&buf[..size]) {
-                        if matches_want(&pkt.data) {
-                            collected.push(pkt.data);
-                            if collected.len() >= expected {
-                                break;
-                            }
-                        }
-                    }
+        // Loop ends on read timeout (recv_from returns Err).
+        while let Ok((size, _)) = viewer.recv_from(&mut buf) {
+            if let Ok(pkt) = Packet::deserialize_packet(&buf[..size])
+                && matches_want(&pkt.data)
+            {
+                collected.push(pkt.data);
+                if collected.len() >= expected {
+                    break;
                 }
-                Err(_) => break, // read timeout
             }
         }
         collected
@@ -626,8 +626,10 @@ fn test_waveform_routing() {
     let _ = env_logger::try_init();
 
     // Master node
-    let mut master_cfg = ApplicationConfig::default();
-    master_cfg.node_type = NodeType::Master;
+    let master_cfg = ApplicationConfig {
+        node_type: NodeType::Master,
+        ..Default::default()
+    };
     let master_client = TCNetClient::new(master_cfg);
     let mut active = master_client.create_active_node();
     sleep(Duration::from_millis(400));
@@ -683,25 +685,21 @@ fn test_waveform_routing() {
     let mut buf = [0u8; 8192];
     let mut got_waveform = false;
     let mut response_src_port = 0u16;
-    loop {
-        match viewer.recv_from(&mut buf) {
-            Ok((size, src)) => {
-                if let Ok(pkt) = Packet::deserialize_packet(&buf[..size]) {
-                    match pkt.data {
-                        crate::node::tcnet_packet::Data::OptIn(_)
-                        | crate::node::tcnet_packet::Data::OptOut(_)
-                        | crate::node::tcnet_packet::Data::Time(_)
-                        | crate::node::tcnet_packet::Data::Status(_) => {}
-                        crate::node::tcnet_packet::Data::SmallWaveform(_) => {
-                            response_src_port = src.port();
-                            got_waveform = true;
-                            break;
-                        }
-                        _ => {}
-                    }
+    // Loop ends on read timeout (recv_from returns Err).
+    while let Ok((size, src)) = viewer.recv_from(&mut buf) {
+        if let Ok(pkt) = Packet::deserialize_packet(&buf[..size]) {
+            match pkt.data {
+                crate::node::tcnet_packet::Data::OptIn(_)
+                | crate::node::tcnet_packet::Data::OptOut(_)
+                | crate::node::tcnet_packet::Data::Time(_)
+                | crate::node::tcnet_packet::Data::Status(_) => {}
+                crate::node::tcnet_packet::Data::SmallWaveform(_) => {
+                    response_src_port = src.port();
+                    got_waveform = true;
+                    break;
                 }
+                _ => {}
             }
-            Err(_) => break,
         }
     }
 
@@ -798,8 +796,10 @@ fn test_metrics_broadcast_for_stopped_layer() {
     let _ = env_logger::try_init();
 
     // Master node — loads a track on L1 but does NOT play it.
-    let mut master_cfg = ApplicationConfig::default();
-    master_cfg.node_type = NodeType::Master;
+    let master_cfg = ApplicationConfig {
+        node_type: NodeType::Master,
+        ..Default::default()
+    };
     let master_client = TCNetClient::new(master_cfg);
     let mut active = master_client.create_active_node();
     sleep(Duration::from_millis(400));
@@ -846,13 +846,11 @@ fn test_metrics_broadcast_for_stopped_layer() {
     while metrics.is_none() && std::time::Instant::now() < deadline {
         match viewer.recv_from(&mut buf) {
             Ok((size, _)) => {
-                if let Ok(pkt) = Packet::deserialize_packet(&buf[..size]) {
-                    if let Data::Metrics(m) = pkt.data {
-                        if m.layer_id == LayerId::L1.as_packet_id() {
+                if let Ok(pkt) = Packet::deserialize_packet(&buf[..size])
+                    && let Data::Metrics(m) = pkt.data
+                        && m.layer_id == LayerId::L1.as_packet_id() {
                             metrics = Some(m);
                         }
-                    }
-                }
             }
             Err(_) => break,
         }
@@ -947,8 +945,10 @@ fn test_big_waveform_reassembles_multi_packet_response() {
 
     let _ = env_logger::try_init();
 
-    let mut node_config = ApplicationConfig::default();
-    node_config.node_type = NodeType::Master;
+    let node_config = ApplicationConfig {
+        node_type: NodeType::Master,
+        ..Default::default()
+    };
     let client = TCNetClient::new(node_config);
     sleep(Duration::from_millis(400));
 
@@ -1036,8 +1036,10 @@ fn test_artwork_file_reassembles_multi_packet_response() {
 
     let _ = env_logger::try_init();
 
-    let mut node_config = ApplicationConfig::default();
-    node_config.node_type = NodeType::Master;
+    let node_config = ApplicationConfig {
+        node_type: NodeType::Master,
+        ..Default::default()
+    };
     let client = TCNetClient::new(node_config);
     sleep(Duration::from_millis(400));
 
@@ -1136,15 +1138,12 @@ fn test_uptime_increments_in_optin() {
     let mut buf = [0u8; 8192];
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     while std::time::Instant::now() < deadline {
-        if let Ok((size, _)) = listener.recv_from(&mut buf) {
-            if let Ok(pkt) = Packet::deserialize_packet(&buf[..size]) {
-                if let Data::OptIn(oi) = pkt.data {
-                    if oi.uptime > max_uptime {
+        if let Ok((size, _)) = listener.recv_from(&mut buf)
+            && let Ok(pkt) = Packet::deserialize_packet(&buf[..size])
+                && let Data::OptIn(oi) = pkt.data
+                    && oi.uptime > max_uptime {
                         max_uptime = oi.uptime;
                     }
-                }
-            }
-        }
     }
     assert!(
         max_uptime > 0,
@@ -1309,13 +1308,11 @@ fn test_optout_emitted_on_drop() {
     let mut got_optout = false;
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while !got_optout && std::time::Instant::now() < deadline {
-        if let Ok((size, _)) = listener.recv_from(&mut buf) {
-            if let Ok(pkt) = Packet::deserialize_packet(&buf[..size]) {
-                if matches!(pkt.data, Data::OptOut(_)) {
+        if let Ok((size, _)) = listener.recv_from(&mut buf)
+            && let Ok(pkt) = Packet::deserialize_packet(&buf[..size])
+                && matches!(pkt.data, Data::OptOut(_)) {
                     got_optout = true;
                 }
-            }
-        }
     }
     assert!(
         got_optout,
@@ -1330,8 +1327,10 @@ fn test_empty_response_sends_error_notification() {
 
     let _ = env_logger::try_init();
 
-    let mut node_config = ApplicationConfig::default();
-    node_config.node_type = NodeType::Master;
+    let node_config = ApplicationConfig {
+        node_type: NodeType::Master,
+        ..Default::default()
+    };
     let client = TCNetClient::new(node_config);
     let _active = client.create_active_node();
     // Deliberately do NOT load a track → response_data is empty.
@@ -1364,13 +1363,11 @@ fn test_empty_response_sends_error_notification() {
     let mut got_err = false;
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while !got_err && std::time::Instant::now() < deadline {
-        if let Ok((size, _)) = viewer.recv_from(&mut buf) {
-            if let Ok(pkt) = Packet::deserialize_packet(&buf[..size]) {
-                if matches!(pkt.data, Data::ErrorNotification(_)) {
+        if let Ok((size, _)) = viewer.recv_from(&mut buf)
+            && let Ok(pkt) = Packet::deserialize_packet(&buf[..size])
+                && matches!(pkt.data, Data::ErrorNotification(_)) {
                     got_err = true;
                 }
-            }
-        }
     }
     assert!(
         got_err,
@@ -1400,8 +1397,10 @@ fn test_status_unicast_only_to_slaves() {
 
     let _ = env_logger::try_init();
 
-    let mut master_cfg = ApplicationConfig::default();
-    master_cfg.node_type = NodeType::Master;
+    let master_cfg = ApplicationConfig {
+        node_type: NodeType::Master,
+        ..Default::default()
+    };
     let client = TCNetClient::new(master_cfg);
     let _active = client.create_active_node();
     sleep(Duration::from_millis(400));
@@ -1444,13 +1443,11 @@ fn test_status_unicast_only_to_slaves() {
     let mut slave_got_status = false;
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     while !slave_got_status && std::time::Instant::now() < deadline {
-        if let Ok((size, _)) = slave_sock.recv_from(&mut buf) {
-            if let Ok(pkt) = Packet::deserialize_packet(&buf[..size]) {
-                if matches!(pkt.data, Data::Status(_)) {
+        if let Ok((size, _)) = slave_sock.recv_from(&mut buf)
+            && let Ok(pkt) = Packet::deserialize_packet(&buf[..size])
+                && matches!(pkt.data, Data::Status(_)) {
                     slave_got_status = true;
                 }
-            }
-        }
     }
     assert!(
         slave_got_status,
@@ -1461,13 +1458,11 @@ fn test_status_unicast_only_to_slaves() {
     let mut master_got_status = false;
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while !master_got_status && std::time::Instant::now() < deadline {
-        if let Ok((size, _)) = other_master.recv_from(&mut buf) {
-            if let Ok(pkt) = Packet::deserialize_packet(&buf[..size]) {
-                if matches!(pkt.data, Data::Status(_)) {
+        if let Ok((size, _)) = other_master.recv_from(&mut buf)
+            && let Ok(pkt) = Packet::deserialize_packet(&buf[..size])
+                && matches!(pkt.data, Data::Status(_)) {
                     master_got_status = true;
                 }
-            }
-        }
     }
     assert!(
         !master_got_status,

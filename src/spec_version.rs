@@ -473,10 +473,8 @@ mod tests {
     }
 
     // ----------------------------------------------------------------
-    // Builder-gating demo — proves the IncludesFlame relation actually
-    // gates methods at compile time. Phase 5 wires real builders to
-    // this pattern; this module exists so the regression has a
-    // dedicated home now.
+    // Builder-gating demo — a regression proving the IncludesFlame
+    // relation actually gates methods at compile time.
     // ----------------------------------------------------------------
 
     mod gating_demo {

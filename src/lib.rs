@@ -60,6 +60,12 @@
 //! ## Modules
 //!
 //! * [`api`] — typed `Node<R: Role, V: SpecVersion>` + `NodeBuilder` (start here).
+//! * [`active_node`] — [`ActiveDJNode`](active_node::ActiveDJNode), the Master
+//!   broadcaster handle (`set_*` / `load_track` / `broadcast_*`) that
+//!   `Node<Master>` derefs to.
+//! * [`view`] — per-peer read view of a foreign DJ controller backing
+//!   [`Node::layers_for`](crate::api::Node::layers_for); the `'static`
+//!   [`WaveformRequester`](view::WaveformRequester) handle lives here.
 //! * [`spec_version`] — `SpecVersion` markers, `Flame` per-field introduction
 //!   tags, `IncludesFlame<F>` relation for compile-time version gating,
 //!   `PeerVersion` runtime carrier.
@@ -97,9 +103,6 @@
 //!   artwork from `Node<Slave, V3_6>::request_*(addr, layer).await`;
 //!   Masters serve the matching response from a pre-populated cache, or
 //!   reply with `ErrorNotification(014, EMPTY)` per spec.
-//!
-//! See [`docs/SPEC_AUDIT_V3_5_1B.md`](../../docs/SPEC_AUDIT_V3_5_1B.md) for the
-//! row-by-row conformance audit.
 //!
 //! ## Status
 //!

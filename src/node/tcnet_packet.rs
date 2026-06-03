@@ -68,21 +68,6 @@ impl Packet {
                     AppSpecificData::from_bytes(remaining).map_err(SerdeError::InvalidData)?;
                 AppSpecific(inner)
             }
-            101 => {
-                let (_, inner) =
-                    ControlData::from_bytes(remaining).map_err(SerdeError::InvalidData)?;
-                Control(inner)
-            }
-            128 => {
-                let (_, inner) =
-                    TextData::from_bytes(remaining).map_err(SerdeError::InvalidData)?;
-                Text(inner)
-            }
-            132 => {
-                let (_, inner) =
-                    KeyboardData::from_bytes(remaining).map_err(SerdeError::InvalidData)?;
-                Keyboard(inner)
-            }
             200 => {
                 // Data type is the first byte of the remaining buffer
                 let data_type =
@@ -267,9 +252,6 @@ impl Data {
             ErrorNotification(_) => (13, None),
             Request(_) => (20, None),
             AppSpecific(_) => (30, None),
-            Control(_) => (101, None),
-            Text(_) => (128, None),
-            Keyboard(_) => (132, None),
 
             Metrics(_) => (200, Some(2)),
             Meta(_) => (200, Some(4)),
@@ -280,12 +262,14 @@ impl Data {
             Mixer(_) => (200, Some(150)),
 
             ArtworkFile(_) => (200, Some(128)),
-            // AppSpecific(_) => 254, None)
             Time(_) => (254, None),
         }
     }
 }
 
+// Short-lived dispatch enum: matched and moved, never stored in bulk. The
+// wire payloads differ wildly in size; boxing would only add indirection.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum Data {
     OptIn(OptInData),
@@ -295,9 +279,6 @@ pub enum Data {
     ErrorNotification(ErrorNotificationData),
     Request(RequestData),
     AppSpecific(AppSpecificData),
-    Control(ControlData),
-    Text(TextData),
-    Keyboard(KeyboardData),
     Metrics(MetricsData),
     Meta(MetaData),
     BeatGrid(BeatGridHeader),
@@ -319,9 +300,6 @@ impl DekuWriter for Data {
             ErrorNotification(data) => data.to_writer(writer, ctx),
             Request(data) => data.to_writer(writer, ctx),
             AppSpecific(data) => data.to_writer(writer, ctx),
-            Control(data) => data.to_writer(writer, ctx),
-            Text(data) => data.to_writer(writer, ctx),
-            Keyboard(data) => data.to_writer(writer, ctx),
             Metrics(data) => data.to_writer(writer, ctx),
             Meta(data) => data.to_writer(writer, ctx),
             BeatGrid(data) => data.to_writer(writer, ctx),

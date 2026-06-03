@@ -40,8 +40,10 @@ impl<R: Role, V: SpecVersion> NodeBuilder<R, V> {
     /// Builder with library defaults: zero `node_id`, `0.0.0.0`
     /// local IP, "Default_" node name.
     pub fn new() -> Self {
-        let mut config = ApplicationConfig::default();
-        config.node_type = R::NODE_TYPE;
+        let config = ApplicationConfig {
+            node_type: R::NODE_TYPE,
+            ..Default::default()
+        };
         Self {
             config,
             local_ip: Ipv4Addr::UNSPECIFIED,
@@ -121,8 +123,10 @@ mod tests {
 
     #[test]
     fn with_config_corrects_role_mismatch() {
-        let mut cfg = ApplicationConfig::default();
-        cfg.node_type = NodeType::Master;
+        let cfg = ApplicationConfig {
+            node_type: NodeType::Master,
+            ..Default::default()
+        };
         let b = NodeBuilder::<Slave, V3_6>::new().with_config(cfg);
         assert_eq!(b.config().node_type, NodeType::Slave);
     }

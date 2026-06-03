@@ -4,12 +4,11 @@
 //! mirrors a packet layout described in the TCNet V3.5.1B specification
 //! (vendored under `docs/spec/`).
 //!
-//! These types are constructed and consumed inside the crate's transport /
-//! session / proto layers; downstream callers see them surfaced through
-//! [`Node`](crate::api::Node) accessors (`layers_for`, `mixer_for`,
-//! `request_*`, etc.).  They're public so observers can match on raw
-//! packet contents and so the message-type catalogue is part of the
-//! documented API surface.
+//! These types are constructed and consumed inside the crate; downstream
+//! callers see them surfaced through [`Node`](crate::api::Node) accessors
+//! (`layers_for`, `mixer_for`, `request_*`, etc.).  They're public so
+//! observers can match on raw packet contents and so the message-type
+//! catalogue is part of the documented API surface.
 //!
 //! # Message-type catalogue
 //!
@@ -26,16 +25,13 @@
 //! | 13           | —           | unicast          | [`ErrorNotificationData`]     |
 //! | 20           | —           | unicast          | [`RequestData`]               |
 //! | 30           | —           | broadcast (60001) / unicast | [`AppSpecificData`] |
-//! | 101          | —           | unicast          | [`ControlData`]               |
-//! | 128          | —           | broadcast (60000) / unicast | [`TextData`]       |
-//! | 132          | —           | broadcast (60000) / unicast | [`KeyboardData`]   |
 //! | 200          | 2           | unicast          | [`MetricsData`]               |
 //! | 200          | 4           | unicast          | [`MetaData`]                  |
 //! | 200          | 8           | unicast          | [`BeatGridHeader`] + [`BeatGridEntry`] |
 //! | 200          | 12          | unicast          | [`CueData`] + [`CueEntry`]    |
 //! | 200          | 16          | unicast          | [`SmallWaveformData`]         |
 //! | 200          | 32          | unicast          | [`BigWaveformData`]           |
-//! | 204          | 128         | unicast          | [`ArtworkFileData`]           |
+//! | 200          | 128         | unicast          | [`ArtworkFileData`]           |
 //! | 200          | 150         | unicast          | [`MixerData`] + [`MixerChannel`] |
 //! | 213          | —           | broadcast (60000) / unicast | [`AppSpecificData`] |
 //! | 254          | —           | broadcast (60001) / unicast | [`TimePacketData`] + [`LayerTimecode`] |
@@ -839,133 +835,6 @@ pub struct RequestData {
     pub data_type: RequestDataType,
     /// The layer the data is associated with.
     pub layer: LayerId,
-}
-
-/// Control message (message type 101).
-///
-/// Carries an ASCII control path (path-like string). Used by TCNet Control
-/// Message-capable nodes (`SUPPORTS_TCNCM` in [`NodeOptions`]).
-#[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
-pub struct ControlData {
-    step: u8,                    // Step No (0=Initialize, 1=Response)
-    _reserved0: ReservedData<1>, // RESERVED
-    #[deku(endian = "little")]
-    data_size: u32, // Total Data Size
-    _reserved1: ReservedData<12>, // RESERVED
-    #[deku(count = "data_size")]
-    control_path: Vec<u8>, // String with Control Path (ASCII TEXT)
-}
-
-impl ControlData {
-    /// Build an outgoing initial (`step = 0`) Control message
-    /// carrying `path_bytes`.
-    pub fn new_initial(path_bytes: Vec<u8>) -> Self {
-        Self {
-            step: 0,
-            _reserved0: ReservedData::default(),
-            data_size: path_bytes.len() as u32,
-            _reserved1: ReservedData::default(),
-            control_path: path_bytes,
-        }
-    }
-
-    /// Build an outgoing response (`step = 1`) Control message.
-    pub fn new_response(path_bytes: Vec<u8>) -> Self {
-        Self {
-            step: 1,
-            _reserved0: ReservedData::default(),
-            data_size: path_bytes.len() as u32,
-            _reserved1: ReservedData::default(),
-            control_path: path_bytes,
-        }
-    }
-
-    /// Initiator vs. response (`0` / `1` per spec).
-    pub fn step(&self) -> u8 {
-        self.step
-    }
-
-    /// The carried path bytes (ASCII).
-    pub fn control_path(&self) -> &[u8] {
-        &self.control_path
-    }
-}
-
-/// Text payload (message type 128).
-///
-/// Carries an arbitrary ASCII text string of length `data_size`.
-#[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
-pub struct TextData {
-    step: u8,                    // Step No (0=Initialize, 1=Response)
-    _reserved0: ReservedData<1>, // RESERVED
-    #[deku(endian = "little")]
-    data_size: u32, // Total Data Size
-    _reserved1: ReservedData<12>, // RESERVED
-    #[deku(count = "data_size")]
-    text_data: Vec<u8>, // String Text Data (ASCII TEXT)
-}
-
-impl TextData {
-    /// Build an outgoing initial Text packet (step = 0).
-    pub fn new_initial(bytes: Vec<u8>) -> Self {
-        Self {
-            step: 0,
-            _reserved0: ReservedData::default(),
-            data_size: bytes.len() as u32,
-            _reserved1: ReservedData::default(),
-            text_data: bytes,
-        }
-    }
-
-    /// Build an outgoing response Text packet (step = 1).
-    pub fn new_response(bytes: Vec<u8>) -> Self {
-        Self {
-            step: 1,
-            _reserved0: ReservedData::default(),
-            data_size: bytes.len() as u32,
-            _reserved1: ReservedData::default(),
-            text_data: bytes,
-        }
-    }
-
-    pub fn step(&self) -> u8 {
-        self.step
-    }
-
-    pub fn text_data(&self) -> &[u8] {
-        &self.text_data
-    }
-}
-
-/// Keyboard input passthrough (message type 132).
-///
-/// Two bytes of HEX-ASCII keyboard scan-code data.
-#[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
-pub struct KeyboardData {
-    _reserved0: ReservedData<1>, // RESERVED
-    _reserved1: ReservedData<1>, // RESERVED
-    #[deku(endian = "little")]
-    data_size: u32, // Total Data Size
-    _reserved2: ReservedData<12>, // RESERVED
-    keyboard_data: [u8; 2],      // Keyboard Data (HEX ASCII Code)
-}
-
-impl KeyboardData {
-    /// Build a Keyboard packet from a 2-byte HEX-ASCII scan code.
-    pub fn new(scan_code: [u8; 2]) -> Self {
-        Self {
-            _reserved0: ReservedData::default(),
-            _reserved1: ReservedData::default(),
-            data_size: 2,
-            _reserved2: ReservedData::default(),
-            keyboard_data: scan_code,
-        }
-    }
-
-    /// The 2-byte HEX-ASCII scan code.
-    pub fn scan_code(&self) -> [u8; 2] {
-        self.keyboard_data
-    }
 }
 
 /// Periodic per-layer playback metrics (message type 200, data type 2).
