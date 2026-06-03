@@ -1,4 +1,4 @@
-//! Typed public API (ARCHITECTURE.md §8).
+//! Typed public API.
 //!
 //! [`Node<R, V>`](Node) is the single handle every consumer interacts
 //! with.  Construct it via [`NodeBuilder`]; read state via

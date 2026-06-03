@@ -10,8 +10,7 @@
 //! [`spec_version`] module so consumers can reason about cross-version
 //! compatibility at compile time.
 //!
-//! The full TCNet V3.5.1B spec is vendored under `docs/spec/` next to a
-//! compliance audit at [`docs/SPEC_AUDIT_V3_5_1B.md`](../../docs/SPEC_AUDIT_V3_5_1B.md).
+//! The full TCNet V3.5.1B spec is vendored under `docs/spec/`.
 //!
 //! ## Quick start
 //!
@@ -43,32 +42,20 @@
 //! ```
 //!
 //! For an active-broadcaster role (emulate a virtual CDJ), parameterise the
-//! builder on [`api::Master`](crate::api::Master) instead — the returned
+//! builder on [`api::Master`] instead — the returned
 //! [`Node<Master, V3_6>`](crate::api::Node) `Deref`s to the inner broadcaster
 //! handle whose `set_*` / `load_track` / `broadcast_*` methods drive the wire.
 //!
 //! ## Architecture
 //!
-//! Six layers, all lock-free internally (no `Mutex` / `RwLock` anywhere):
-//!
-//! ```text
-//!  ┌─────────────────────────── api::Node<R, V> ────────────────────────────┐
-//!  │  typed handle — role gating (Slave/Master/Auto), FLAME gating          │
-//!  └────┬───────────┬───────────────┬──────────────────────┬───────────────┘
-//!       │ snapshot  │ request_*     │ broadcast_* / set_*  │ TimeSync /
-//!       ▼           ▼               ▼  (Master)            ▼ Election
-//!  ┌────────┐  ┌──────────┐  ┌────────────────┐  ┌────────────────────┐
-//!  │ domain │  │  proto   │  │   session      │  │ runtime (Ticker)   │
-//!  │ writer │  │ machines │  │ single-actor   │  │ drift-corrected    │
-//!  └────────┘  └──────────┘  │ ArcSwap snaps  │  └────────────────────┘
-//!                            └───────┬────────┘
-//!                                    ▼
-//!                            ┌──────────────────┐
-//!                            │   transport      │
-//!                            │ UDP 60000 / 60001│
-//!                            │ 60002 / 65023+   │
-//!                            └──────────────────┘
-//! ```
+//! [`api::Node<R, V>`] is a typed handle (role gating Slave/Master/Auto,
+//! FLAME gating by [`spec_version`]) over the dispatcher runtime. The
+//! dispatcher owns the four UDP sockets (60000 / 60001 / 60002 / 65023+),
+//! drives discovery, Time / Status / Metrics emission, the TimeSync
+//! handshake ([`proto::time_sync`]) and master election
+//! ([`session::election`]). Peer state is lock-free: an
+//! `ArcSwap<HashMap<_, Arc<ForeignNode>>>` published by the dispatcher and
+//! read by many — no `Mutex` / `RwLock` anywhere in the crate.
 //!
 //! ## Modules
 //!
@@ -79,19 +66,9 @@
 //! * [`protocol`] — wire-format payload types: every packet struct, plus
 //!   helper newtypes ([`LayerId`], [`LayerState`], [`Bpm`], [`Speed`],
 //!   [`AsciiString`], …) and the [`ManagementHeader`](crate::protocol::ManagementHeader).
-//! * [`session`] — single-actor `SessionTask` with `Peer<…>` lifecycle FSM,
-//!   master-election state machine, `SessionSnapshot` published via
-//!   `ArcSwap`.
-//! * [`proto`] — protocol machines: `ChunkedFrame<T>` reassembly, `TimeSync`
-//!   handshake with spec-page-8 clock-offset computation, `ControlPath` /
-//!   `TextMessage` / `KeyPress` typed builders, `AppSpecificReassembler`,
-//!   `Pending<T>` / `RequestError` request/response.
-//! * [`domain`] — `DomainLayerSnapshot` with `Option`-typed merge fields,
-//!   `TimestampOrdered<T>` writer for out-of-order packet flows.
-//! * [`runtime`] — drift-corrected `Ticker` for the periodic RT cadences
-//!   (20 ms Time, 50 ms Metrics, 1 Hz OptIn / Status / election).
-//! * [`transport`] — `Transport` trait + `UdpTransport` (real network) +
-//!   `MemoryTransport` (in-process loopback for tests) + `BufferPool`.
+//! * [`session`] — master-election state machine ([`session::election`]).
+//! * [`proto`] — the [`TimeSync`](proto::time_sync) handshake with
+//!   spec-page-8 clock-offset computation.
 //!
 //! ## Behaviour summary
 //!
@@ -104,7 +81,9 @@
 //!   + unicast to each discovered node.
 //! * **Status** — Master broadcasts on 60000 every 1 s + unicast to slaves.
 //! * **Metrics / Meta / Mixer** — unicast to each slave per spec cadences.
-//! * **TimeSync** — 5 s round-robin handshake initiator; inbound step=0
+//! * **TimeSync** — handshake initiator ticks every 1 s and targets the
+//!   most-recently-seen peer whose 5 s per-peer cooldown has elapsed (so
+//!   short-lived peers get serviced before they vanish); inbound step=0
 //!   replies stamped with our current `header.timestamp`; inbound step=1
 //!   resolves the clock offset per spec page 8 formula
 //!   (`Delay = (Current timer − Remote timestamp) / 2`,
@@ -118,10 +97,6 @@
 //!   artwork from `Node<Slave, V3_6>::request_*(addr, layer).await`;
 //!   Masters serve the matching response from a pre-populated cache, or
 //!   reply with `ErrorNotification(014, EMPTY)` per spec.
-//! * **Control / Text / Keyboard / AppSpecific** — wire format parsed +
-//!   typed builders in `proto::`; multi-packet AppSpecific reassembles via
-//!   `proto::AppSpecificReassembler` (validates spec-page-30 packet
-//!   signature `178_260_640`).
 //!
 //! See [`docs/SPEC_AUDIT_V3_5_1B.md`](../../docs/SPEC_AUDIT_V3_5_1B.md) for the
 //! row-by-row conformance audit.
@@ -145,16 +120,13 @@ use tokio::runtime::Runtime;
 
 pub mod active_node;
 pub mod api;
-pub mod domain;
 mod node;
 pub mod proto;
 pub mod protocol;
-pub mod runtime;
 pub mod session;
 pub mod spec_version;
 #[cfg(test)]
 mod tests;
-pub mod transport;
 pub mod view;
 
 pub use active_node::{ActiveDJNode, HotCue, TrackMeta};
@@ -179,10 +151,12 @@ pub use spec_version::{
     MixerExtendedFlame, NodeOptionsFlame, OptInVendorFlame, SmallBigWaveformFlame,
     SmpteInTimePacketFlame, UnicastOptInOutFlame,
 };
-pub use view::{DjControllerView, WaveformRequester};
+pub use view::WaveformRequester;
+pub(crate) use view::DjControllerView;
 
 /// Snapshot of a foreign node discovered on the network through TCNet OptIn
-/// broadcasts. Returned by [`TCNetClient::active_nodes`].
+/// broadcasts. Surfaced to callers as [`PeerInfo`] via
+/// [`Node::snapshot`](crate::api::Node::snapshot).
 #[derive(Clone, Debug)]
 pub struct ForeignNodeInfo {
     /// The node's listener address (IP + unicast port reported in its OptIn packet).
@@ -193,7 +167,8 @@ pub struct ForeignNodeInfo {
     /// The 16-bit node identifier reported in the node's `ManagementHeader`.
     pub node_id: NodeId,
     /// `true` once any DJ-controller-class packet (Status / Metrics / Mixer / etc.)
-    /// has been received from this node — meaning a [`DjControllerView`] is available.
+    /// has been received from this node — meaning per-layer reads via
+    /// [`Node::layers_for`](crate::api::Node::layers_for) are available.
     pub has_dj_controller: bool,
 }
 
@@ -208,31 +183,27 @@ impl From<&ForeignNode> for ForeignNodeInfo {
     }
 }
 
-/// Entry point to the TCNet network.
+/// Internal engine behind the public [`Node`](crate::api::Node) handle.
 ///
-/// Constructing a `TCNetClient` spawns a dedicated single-threaded tokio runtime,
-/// binds the four UDP sockets used by TCNet (broadcast on 60000 / 60001 / 60002,
-/// plus a configurable unicast port — the dispatcher will fall back to the next
-/// free port if any of these are taken) and starts the discovery loop, which
-/// emits an OptIn broadcast every second and listens for replies from peers.
+/// Constructed by [`NodeBuilder::spawn`](crate::api::NodeBuilder::spawn);
+/// not part of the public surface. Spawns a dedicated single-threaded tokio
+/// runtime, binds the four UDP sockets used by TCNet (broadcast on
+/// 60000 / 60001 / 60002, plus a configurable unicast port — the dispatcher
+/// falls back to the next free port if any are taken) and starts the
+/// discovery loop, which emits an OptIn broadcast every second and listens
+/// for replies from peers.
 ///
-/// From here the two roles split:
+/// `Node` drives it through two paths:
 ///
-/// * Call [`get_controller_view`](Self::get_controller_view) (or
-///   [`get_any_controller_view`](Self::get_any_controller_view)) to attach a
-///   reader to a foreign DJ controller node.
-/// * Call [`create_active_node`](Self::create_active_node) to start broadcasting
-///   this process's playback state.
-///
-/// Both can be used at the same time.
+/// * [`get_controller_view`](Self::get_controller_view) attaches a reader to
+///   a foreign DJ controller node (backs `Node::layers_for` / `request_*`).
+/// * [`create_active_node`](Self::create_active_node) starts broadcasting
+///   this process's playback state (backs `Node<Master>`).
 pub(crate) struct TCNetClient {
     _runtime: Runtime,
     dispatcher: Arc<Dispatcher>,
     /// Wait-free atomic snapshot of the published discovered-nodes vector.
     nodes_snapshot: Arc<arc_swap::ArcSwap<Vec<ForeignNodeInfo>>>,
-    /// Cached Arc handle returned by the last `active_nodes()` call so we
-    /// can hand out `&[ForeignNodeInfo]` with a stable lifetime.
-    cached_nodes: Arc<Vec<ForeignNodeInfo>>,
     active_broadcast_tx: kanal::Sender<Data>,
     active_slave_unicast_tx: kanal::Sender<Data>,
     active_time_tx: kanal::Sender<Data>,
@@ -291,7 +262,6 @@ impl TCNetClient {
             _runtime: runtime,
             dispatcher,
             nodes_snapshot,
-            cached_nodes: Arc::new(Vec::new()),
             active_broadcast_tx,
             active_slave_unicast_tx,
             active_time_tx,
@@ -299,19 +269,7 @@ impl TCNetClient {
         }
     }
 
-    /// Return the latest known set of foreign nodes seen on the network.
-    ///
-    /// This is a snapshot — calling it again later returns an updated list.
-    /// Nodes that have not been heard from for ≥ 10 s are dropped automatically.
-    pub fn active_nodes(&mut self) -> &[ForeignNodeInfo] {
-        // Wait-free load of the most recent published snapshot.
-        self.cached_nodes = self.nodes_snapshot.load_full();
-        self.cached_nodes.as_slice()
-    }
-
-    /// Lock-free read of the foreign-node list — does not refresh
-    /// the internal cache and does not require `&mut self`.  Cheaper
-    /// when you don't need a stable borrow.
+    /// Lock-free read of the published foreign-node list.
     pub fn nodes_snapshot_arc(&self) -> std::sync::Arc<Vec<ForeignNodeInfo>> {
         self.nodes_snapshot.load_full()
     }
@@ -348,16 +306,22 @@ impl TCNetClient {
     /// can only be claimed once, so the second call returns `None`.
     pub fn get_controller_view(&self, addr: SocketAddrV4) -> Option<DjControllerView> {
         let map = self.dispatcher.state.load_full();
-        let ctrl = map.get(&addr)?.dj_controller()?;
+        // The peer map is keyed by `(Ipv4Addr, NodeId)`, but callers hold
+        // the announced unicast address — resolve it by scanning values.
+        let ctrl = map
+            .values()
+            .find(|n| n.address() == addr)?
+            .dj_controller()?;
         Some(DjControllerView::new(
             ctrl.state.clone(),
             ctrl.request_tx.clone(),
         ))
     }
 
-    /// Convenience: return a [`DjControllerView`] for the first discovered node
-    /// that has a DJ controller attached. Returns `None` if no such node has
-    /// been seen yet.
+    /// Return a [`DjControllerView`] for the first discovered node that has a
+    /// DJ controller attached. Test-only convenience — production code attaches
+    /// to a specific peer address via [`get_controller_view`](Self::get_controller_view).
+    #[cfg(test)]
     pub fn get_any_controller_view(&self) -> Option<DjControllerView> {
         let map = self.dispatcher.state.load_full();
         for node in map.values() {

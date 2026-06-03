@@ -48,7 +48,7 @@ pub struct ElectionCandidate {
 
 impl ElectionCandidate {
     /// Spec tie-break: `(uptime DESC, announced_at ASC, node_id ASC)`.
-    /// Used by [`Election::resolve`].
+    /// Used by [`Election::observe`](Election::observe).
     pub fn priority_cmp(&self, other: &Self) -> Ordering {
         // Higher uptime wins → reverse cmp.
         other
@@ -88,8 +88,7 @@ impl Default for ElectionState {
     }
 }
 
-/// The election state machine.  Owned by the
-/// [`SessionTask`](super::SessionTask).
+/// The election state machine. Driven by the dispatcher's election driver.
 #[derive(Debug, Clone, Default)]
 pub struct Election {
     pub state: ElectionState,

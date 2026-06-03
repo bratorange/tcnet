@@ -1012,7 +1012,7 @@ fn test_big_waveform_reassembles_multi_packet_response() {
 
     let assembled = client
         ._runtime
-        .block_on(view.request_big_waveform(LayerId::L1))
+        .block_on(view.waveform_requester().request_big_waveform(LayerId::L1))
         .expect("request_big_waveform timed out");
 
     let _ = responder
@@ -1098,7 +1098,7 @@ fn test_artwork_file_reassembles_multi_packet_response() {
 
     let assembled = client
         ._runtime
-        .block_on(view.request_artwork_file(LayerId::L1))
+        .block_on(view.waveform_requester().request_artwork_file(LayerId::L1))
         .expect("request_artwork_file timed out");
 
     let _ = responder
@@ -1407,12 +1407,17 @@ fn test_status_unicast_only_to_slaves() {
     sleep(Duration::from_millis(400));
 
     // Two fake peers: one Slave, one Master. Each binds an ephemeral port,
-    // registers via OptIn so the dispatcher knows about them.
+    // registers via OptIn so the dispatcher knows about them.  They MUST carry
+    // distinct node_ids: the peer map is keyed by `(src_ip, node_id)`, and both
+    // peers share the loopback IP, so reusing one node_id would (correctly)
+    // collapse them into a single entry — node ids are the per-host node
+    // discriminator and two co-hosted nodes never share one.
     let slave_sock = UdpSocket::bind("127.0.0.1:0").expect("bind slave");
     slave_sock.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
     let slave_port = slave_sock.local_addr().unwrap().port();
     let slave_cfg = ApplicationConfig {
         node_type: NodeType::Slave,
+        node_id: 201,
         address: SocketAddrV4::new(Ipv4Addr::LOCALHOST, slave_port),
         ..master_cfg
     };
@@ -1422,6 +1427,7 @@ fn test_status_unicast_only_to_slaves() {
     let other_master_port = other_master.local_addr().unwrap().port();
     let other_master_cfg = ApplicationConfig {
         node_type: NodeType::Master,
+        node_id: 202,
         address: SocketAddrV4::new(Ipv4Addr::LOCALHOST, other_master_port),
         ..master_cfg
     };
@@ -1474,7 +1480,7 @@ fn test_status_unicast_only_to_slaves() {
 fn test_dj_packet_publishes_correct_node_id() {
     let _ = env_logger::try_init();
 
-    let mut client = TCNetClient::new(ApplicationConfig::default());
+    let client = TCNetClient::new(ApplicationConfig::default());
     sleep(Duration::from_millis(400));
 
     // Send a Metrics packet WITHOUT prior OptIn. is_dj_packet creates a
@@ -1492,7 +1498,7 @@ fn test_dj_packet_publishes_correct_node_id() {
     send_packet(&fake, dest, h, d);
     sleep(Duration::from_millis(400));
 
-    let nodes = client.active_nodes().to_vec();
+    let nodes = client.nodes_snapshot_arc().to_vec();
     let found = nodes
         .iter()
         .find(|n| n.has_dj_controller)
@@ -1502,5 +1508,168 @@ fn test_dj_packet_publishes_correct_node_id() {
         "DJ packet arriving before OptIn published with node_id={} instead of 4242 \
          (ForeignNode created with ApplicationConfig::default())",
         found.node_id
+    );
+}
+
+/// Regression: a DJ packet arriving *before* the peer's OptIn must not split
+/// the peer into two map entries (a first-sight entry holding the DjController
+/// + a later controller-less OptIn entry).  Both share the same announced
+/// `address()`, and `get_controller_view(addr)` resolves by that announced
+/// address — so the split made it return `None` and the consumer (luchs) never
+/// saw the track.  This is the single-host failure mode: the master's 20 ms
+/// Time/Metrics broadcasts reliably beat its 1 s OptIn, so first-sight always
+/// fired first.
+#[test]
+#[serial]
+fn test_dj_packet_before_optin_resolvable_by_announced_addr() {
+    let _ = env_logger::try_init();
+
+    let client = TCNetClient::new(ApplicationConfig::default());
+    sleep(Duration::from_millis(400));
+
+    // Peer announces the spec listener port 65023 — what real CDJ-3000s and our
+    // simulator use, and what `config_from_header` assumes for first-sight DJ
+    // packets.
+    let peer = ApplicationConfig {
+        node_id: 4242,
+        address: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 65_023),
+        ..fake_config()
+    };
+
+    let fake = UdpSocket::bind("127.0.0.1:0").expect("bind fake");
+    let dest: SocketAddr = "127.0.0.1:60000".parse().unwrap();
+
+    // 1. DJ packet (Metrics) arrives first — before any OptIn.
+    let (h, d) = metrics_l1_bytes(&peer, 0);
+    send_packet(&fake, dest, h, d);
+    sleep(Duration::from_millis(200));
+
+    // 2. OptIn lands afterwards.
+    let (h, d) = opt_in_bytes(&peer, 1);
+    send_packet(&fake, dest, h, d);
+    sleep(Duration::from_millis(400));
+
+    let peer_info = client
+        .nodes_snapshot_arc()
+        .iter()
+        .find(|n| n.has_dj_controller)
+        .cloned()
+        .expect("DJ packet should register a node with a DjController");
+
+    assert!(
+        client.get_controller_view(peer_info.address).is_some(),
+        "get_controller_view({}) returned None — the controller-bearing entry \
+         is not resolvable by its announced address (first-sight / OptIn key split)",
+        peer_info.address,
+    );
+}
+
+/// Regression (duplicate / split mode): one peer emits DJ-class packets from
+/// several source ports — Time @ `:60001`, waveform / cue responses @
+/// `:65023`, broadcasts @ `:60000`.  The peer-map key is `(src_ip, node_id)`
+/// and deliberately excludes the source port, so all of them must fold into a
+/// SINGLE entry with a single `DjController`.  The old `SocketAddrV4` key
+/// included the port and split one peer across its ports — that is exactly
+/// what broke single-host track delivery.
+#[test]
+#[serial]
+fn test_peer_not_split_across_source_ports() {
+    let _ = env_logger::try_init();
+
+    let client = TCNetClient::new(ApplicationConfig::default());
+    sleep(Duration::from_millis(400));
+
+    let peer = ApplicationConfig {
+        node_id: 7,
+        address: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 65_023),
+        ..fake_config()
+    };
+    let dest: SocketAddr = "127.0.0.1:60000".parse().unwrap();
+
+    // Two DJ packets (no OptIn at all) from two DIFFERENT source ports, same
+    // (src_ip, node_id) — mimics Time and waveform arriving from one player.
+    let from_a = UdpSocket::bind("127.0.0.1:0").expect("bind a");
+    let from_b = UdpSocket::bind("127.0.0.1:0").expect("bind b");
+    assert_ne!(
+        from_a.local_addr().unwrap().port(),
+        from_b.local_addr().unwrap().port(),
+        "the two source sockets must use different ports for this test to mean anything",
+    );
+
+    let (h, d) = metrics_l1_bytes(&peer, 0);
+    send_packet(&from_a, dest, h, d);
+    let (h, d) = metrics_l1_bytes(&peer, 1);
+    send_packet(&from_b, dest, h, d);
+    sleep(Duration::from_millis(400));
+
+    let dj_entries = client
+        .nodes_snapshot_arc()
+        .iter()
+        .filter(|n| n.has_dj_controller)
+        .count();
+    assert_eq!(
+        dj_entries, 1,
+        "one peer emitting from two source ports produced {dj_entries} DjController \
+         entries, expected 1 — the source port must be excluded from the peer-map key",
+    );
+}
+
+/// Regression (collapse mode): two *distinct* peers that reuse the same
+/// `node_id` from different source IPs must stay distinct.  Node ids are only
+/// unique within a multi-node host, not across the network, so the peer-map
+/// key is `(src_ip, node_id)` — NOT `node_id` alone.  Keying on `node_id`
+/// alone would collapse the two into one entry and cross-wire their DJ data,
+/// a worse failure than the duplicate it would prevent.
+///
+/// This needs a second loopback IP (`127.0.0.2`) usable as a packet *source*.
+/// That works out-of-the-box on Linux; on macOS it requires
+/// `ifconfig lo0 alias 127.0.0.2`.  Where it is unavailable the test skips
+/// (it cannot be expressed on a single IP — collapse is, by definition, an
+/// across-IP property) rather than failing.
+#[test]
+#[serial]
+fn test_same_node_id_distinct_ips_stay_separate() {
+    let _ = env_logger::try_init();
+
+    let from_b = match UdpSocket::bind("127.0.0.2:0") {
+        Ok(s) => s,
+        Err(_) => {
+            eprintln!(
+                "skipping test_same_node_id_distinct_ips_stay_separate: \
+                 second loopback IP 127.0.0.2 not bindable on this host \
+                 (run `sudo ifconfig lo0 alias 127.0.0.2` on macOS to enable)"
+            );
+            return;
+        }
+    };
+
+    let client = TCNetClient::new(ApplicationConfig::default());
+    sleep(Duration::from_millis(400));
+
+    // Identical node_id (9) on both peers; only the source IP differs.
+    let peer = ApplicationConfig {
+        node_id: 9,
+        address: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 65_023),
+        ..fake_config()
+    };
+    let dest: SocketAddr = "127.0.0.1:60000".parse().unwrap();
+
+    let from_a = UdpSocket::bind("127.0.0.1:0").expect("bind a");
+    let (h, d) = metrics_l1_bytes(&peer, 0);
+    send_packet(&from_a, dest, h, d);
+    let (h, d) = metrics_l1_bytes(&peer, 1);
+    send_packet(&from_b, dest, h, d);
+    sleep(Duration::from_millis(400));
+
+    let dj_entries = client
+        .nodes_snapshot_arc()
+        .iter()
+        .filter(|n| n.has_dj_controller)
+        .count();
+    assert_eq!(
+        dj_entries, 2,
+        "two peers sharing node_id=9 from different source IPs collapsed into \
+         {dj_entries} entry/entries, expected 2 — the peer-map key must include \
+         the source IP, not node_id alone",
     );
 }

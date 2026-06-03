@@ -7,10 +7,10 @@ use crate::node::tcnet_packet::{
     Packet, config_from_header, management_header, node_config_from_opt_in, opt_in_packet,
 };
 use crate::node::{ApplicationConfig, ForeignNode};
-use crate::protocol::{LayerId, NodeType, RequestDataType};
+use crate::protocol::{LayerId, NodeId, NodeType, RequestDataType};
 use deku::DekuContainerWrite;
 use getifs::best_local_ipv4_addrs;
-use log::{debug, error, info, trace, warn};
+use log::{error, info, trace, warn};
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
@@ -26,7 +26,18 @@ use tokio::time::interval;
 /// (RCU); per-entry mutations go through `Arc<ForeignNode>`'s
 /// interior mutability (atomics + ArcSwap fields).  No `Mutex` or
 /// `RwLock` anywhere.
-pub(crate) type PeerMap = ArcSwap<HashMap<SocketAddrV4, Arc<ForeignNode>>>;
+///
+/// Keyed by `(Ipv4Addr, NodeId)` — the peer's source IP plus the
+/// 16-bit node id carried in every `ManagementHeader`.  This is the
+/// only key that is unique by construction.  Keying on the socket
+/// address alone splits one peer across the several source ports it
+/// emits from (`:60000` OptIn, `:60001` Time, `:65023` waveform);
+/// keying on `node_id` alone collapses distinct hosts that reuse the
+/// same id — node ids are only unique *within* a multi-node host, not
+/// across the network.  The pair avoids both: the port is excluded so
+/// a peer never duplicates, and the IP disambiguates id reuse so two
+/// hosts never collapse into one entry.
+pub(crate) type PeerMap = ArcSwap<HashMap<(Ipv4Addr, NodeId), Arc<ForeignNode>>>;
 
 pub struct Dispatcher {
     pub(crate) node_config: ApplicationConfig,
@@ -34,7 +45,7 @@ pub struct Dispatcher {
     /// Actual unicast port bound at runtime; may differ from bind_address.port() when falling back.
     pub(crate) actual_unicast_port: AtomicU16,
     /// Monotonic SEQ counter for every outgoing packet (single shared
-    /// source — see ARCHITECTURE.md §5.2). Wraps at u8 boundary by design.
+    /// source). Wraps at u8 boundary by design.
     pub(crate) current_seq: AtomicU8,
     /// Node uptime in seconds, rolling over at 12 h (43_200) per spec
     /// page 4. Owned by `timeout_foreign_nodes` (1 Hz tick), read by
@@ -106,9 +117,6 @@ impl PendingTimeSyncStore {
         let p = new.remove(addr);
         self.inner.store(Arc::new(new));
         p
-    }
-    pub fn len(&self) -> usize {
-        self.inner.load_full().len()
     }
     /// Drop entries older than `max_age`.  Called by the periodic
     /// initiator so a peer that goes silent doesn't leak a slot.
@@ -293,9 +301,8 @@ async fn election_driver(dispatcher: Arc<Dispatcher>) {
 }
 
 /// Tick interval for the TimeSync initiator. The short tick + per-peer
-/// cooldown lets short-lived "ghost" peers (e.g. the ProDJ Link Bridge's
-/// transient sockets, observed at ~5–10 s lifetimes) get serviced
-/// before they vanish.
+/// cooldown lets short-lived peers (some bridges expose transient
+/// sockets that live only a few seconds) get serviced before they vanish.
 const TIME_SYNC_TICK: Duration = Duration::from_millis(1000);
 /// Minimum spacing between consecutive step=0 packets to the same peer.
 const TIME_SYNC_PER_PEER_COOLDOWN: Duration = Duration::from_secs(5);
@@ -344,11 +351,9 @@ async fn time_sync_initiator(dispatcher: Arc<Dispatcher>) {
             .pending_time_sync
             .sweep_stale(now, crate::proto::DEFAULT_MAX_REPLY_AGE);
 
-        // Target the peer's announced unicast address (`fn_arc.address()`
-        // from its OptIn body), NOT the HashMap key (which is the
-        // recv-side address — for peers like the ProDJ Link Bridge
-        // those are broadcast ports the peer never listens on for
-        // unicast TimeSync requests).
+        // Target each peer by its announced unicast address
+        // (`fn_arc.address()`), which is where it listens — see the
+        // peer-identity note in `listen`.
         let map = dispatcher.state.load_full();
         let peers: Vec<(SocketAddrV4, u64)> = map
             .values()
@@ -386,10 +391,6 @@ async fn time_sync_initiator(dispatcher: Arc<Dispatcher>) {
         };
         dispatcher.pending_time_sync.insert(target, pending);
         last_sent.insert(target, now);
-        debug!(
-            "TimeSync: sending step=0 to {} (our_ts_us={}, our_listener={})",
-            target, local_ts_us, unicast_port
-        );
 
         let _ = dispatcher.outgoing_tx.try_send(OutgoingRequest {
             destination: target,
@@ -452,20 +453,25 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
                             _ => unreachable!(),
                         };
                         let src_ip = *src_addr.ip();
+                        // Stable per-peer identity carried in every header.
+                        // `(src_ip, node_id)` is the peer-map key everywhere
+                        // below — see `PeerMap`.  The recv source port is
+                        // deliberately excluded so one peer never splits.
+                        let node_id = packet.header.node_id;
 
                         match &packet.data {
                             OptIn(opt_in_data) => {
                                 let node_config =
                                     node_config_from_opt_in(src_ip, &packet.header, opt_in_data);
-                                // Key by the announced unicast address from
-                                // the OptIn body, NOT the recv source port.
-                                // A peer that broadcasts OptIns from multiple
-                                // source ports (e.g. the Pioneer ProDJ Link
-                                // Bridge emits from 60002 + an ephemeral
-                                // fallback) collapses into one entry per
-                                // announced address — see
-                                // docs/BRIDGE_INTEROP_REPORT.md.
-                                let key = node_config.address;
+                                // Peer identity is `(src_ip, node_id)`.  The
+                                // OptIn body additionally carries the announced
+                                // unicast listener address, which we store on
+                                // the entry (`set_address`) so outgoing unicast
+                                // targets the port the peer actually listens on
+                                // — but it is NOT part of the key, so the
+                                // several source ports a peer emits from never
+                                // split it into duplicate entries.
+                                let key = (src_ip, node_id);
                                 let map = dispatcher.state.load_full();
                                 if let Some(node) = map.get(&key) {
                                     node.touch(timestamp_secs());
@@ -491,9 +497,10 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
 
                             OptOut(_) => {
                                 let map = dispatcher.state.load_full();
-                                if map.contains_key(&src_addr) {
+                                let key = (src_ip, node_id);
+                                if map.contains_key(&key) {
                                     let mut new_map = (*map).clone();
-                                    new_map.remove(&src_addr);
+                                    new_map.remove(&key);
                                     dispatcher.state.store(Arc::new(new_map));
                                     info!("Node {} has opted out of the network", src_ip);
                                 } else {
@@ -512,12 +519,7 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
                                 let (dest, packets) = {
                                     let map = dispatcher.state.load_full();
                                     let dest = map
-                                        .get(&src_addr)
-                                        .or_else(|| {
-                                            map.iter()
-                                                .find(|(k, _)| *k.ip() == src_ip)
-                                                .map(|(_, v)| v)
-                                        })
+                                        .get(&(src_ip, node_id))
                                         .map(|n| n.address())
                                         .unwrap_or(SocketAddrV4::new(src_ip, 65_023));
                                     let packets = build_request_response(
@@ -581,22 +583,13 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
                                             data: Data::TimeSync(reply),
                                         });
                                 } else if ts.step() == 1 {
-                                    debug!(
-                                        "TimeSync: received step=1 from src={} body_port={} echoed_ts={}",
-                                        src_addr,
-                                        ts.node_listener_port(),
-                                        ts.remote_timestamp()
-                                    );
-                                    // Match the reply to its pending slot.
-                                    // Spec page 8 puts the responder's
-                                    // listener port in the reply body, which
-                                    // is the peer's announced unicast — the
-                                    // same address we sent the step=0 to. The
+                                    // Match the reply to its pending slot by the
+                                    // responder's listener port (spec page 8
+                                    // carries it in the reply body) — that is the
+                                    // announced unicast we sent step=0 to. The
                                     // recv src_addr can differ when the peer
-                                    // unicasts the reply from its broadcast
-                                    // socket (observed with the Pioneer ProDJ
-                                    // Link Bridge: reply src is :60002 even
-                                    // though the announced unicast is :65076).
+                                    // replies from its broadcast socket, so fall
+                                    // back to src_addr if the body port misses.
                                     let body_peer = SocketAddrV4::new(
                                         src_ip,
                                         ts.node_listener_port(),
@@ -649,36 +642,31 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
 
                         if is_dj_packet(&packet.data) {
                             let mut created_new_ctrl = false;
-                            // Two-pass routing: prefer exact src_addr match, then any
-                            // entry sharing src_ip.  Routes waveform responses
-                            // (src port 65023) and Time broadcasts (src port 60001)
-                            // to the single DjController registered via OptIn (src
-                            // port 60000), preventing duplicate entries.
+                            // Route every DJ-class packet (Time @ :60001,
+                            // waveform / cue responses @ :65023, etc.) to the
+                            // one `DjController` for this peer.  Keyed by
+                            // `(src_ip, node_id)` — both live in the header, so
+                            // the source port the packet happens to arrive on is
+                            // irrelevant and a peer is never split across the
+                            // ports it emits from.  The later OptIn keys by this
+                            // exact same pair, so a DJ-before-OptIn first sight
+                            // and its OptIn always land on a single entry.
                             let map = dispatcher.state.load_full();
-                            let key = if map.contains_key(&src_addr) {
-                                src_addr
-                            } else if let Some(&k) = map.keys().find(|k| *k.ip() == src_ip) {
-                                k
-                            } else {
-                                src_addr
-                            };
-                            let node_addr = map
-                                .get(&key)
-                                .map(|n| n.address())
-                                .unwrap_or(SocketAddrV4::new(src_ip, 65_023));
-                            // When a DJ packet arrives before its OptIn we still need
-                            // to publish a useful node_id/name etc — lift from the
-                            // header.
+                            let key = (src_ip, node_id);
+                            // When a DJ packet arrives before its OptIn we still
+                            // need a useful node_id / name etc — lift from the
+                            // header.  Its synthesized address (`src_ip:65023`)
+                            // is only the entry's *address* until the real OptIn
+                            // overwrites it; the address is NOT the key, so a
+                            // mismatched listener port can no longer spawn a
+                            // duplicate entry the way it used to.
                             let header_config = config_from_header(&packet.header, src_ip);
 
-                            let existing = map.get(&key).cloned();
-                            let foreign_node = if let Some(fn_arc) = existing {
+                            let foreign_node = if let Some(fn_arc) = map.get(&key).cloned() {
                                 fn_arc
                             } else {
-                                // First-sight node (DJ packet before OptIn).  Insert
-                                // a fresh ForeignNode into the RCU map.
                                 let fresh = Arc::new(ForeignNode::new(
-                                    node_addr,
+                                    header_config.address,
                                     header_config,
                                     timestamp_secs(),
                                 ));

@@ -1,9 +1,4 @@
 //! `NodeBuilder` — fluent construction of typed `Node<R, V>` handles.
-//!
-//! Hides the runtime / dispatcher / socket plumbing behind a
-//! sensibly-defaulted builder so library users don't have to think
-//! about it — matching the "convenience stays inside the lib"
-//! architectural constraint.
 
 use super::node::{Node, NodeError, from_engine};
 use super::roles::{Master, Role};

@@ -172,12 +172,16 @@ pub struct LayerSnapshot {
     pub sync_master: bool,
     pub beat_marker: u8,
     pub track_length_ms: u32,
+    /// Playhead position from Metrics packets (~50 ms cadence). Preferred for
+    /// UI readouts; see also [`current_time_ms`](Self::current_time_ms).
     pub position_ms: u32,
     pub speed: Speed,
     pub beat_number: u32,
     pub bpm: Bpm,
     pub pitch_bend: u16,
 
+    /// Playhead position from Time packets (~20 ms cadence) — the same value
+    /// as [`position_ms`](Self::position_ms) sampled more frequently.
     pub current_time_ms: u32,
     pub total_time_ms: u32,
     pub on_air: u8,

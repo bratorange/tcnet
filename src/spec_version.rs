@@ -1,25 +1,41 @@
-//! TCNet protocol-version machinery (ARCHITECTURE.md §12).
+//! TCNet protocol-version machinery.
 //!
-//! Every TCNet packet field is tagged in the spec with the *FLAME*
-//! revision in which it was added (`V3-3`, `V3-3-2`, `V3-5`, …).  A peer
-//! claiming `protocol_version = 3.6` is not obligated to send fields
-//! that were introduced after its firmware was cut; a peer running a
-//! future revision may emit trailing bytes we don't yet understand.
+//! "FLAME" is the spec's own term, not an acronym: *"a flame number is
+//! used for each addition or change"* so applications stay backwards
+//! compatible. Every TCNet packet field carries the flame revision in
+//! which it was added (`V3.3`, `V3.3.2`, `V3.5`, …). A peer claiming a
+//! given `protocol_version` is not obligated to send fields introduced
+//! after its firmware was cut; a peer on a future revision may emit
+//! trailing bytes we don't yet understand.
 //!
 //! Two parallel type families capture this in the type system:
 //!
-//! * [`SpecVersion`] — a marker for *which revision the local node
-//!   speaks*. The local node always emits at its declared `SpecVersion`
-//!   and no later. Implementations: [`V1_0`], …, [`V3_6`].
+//! * [`SpecVersion`] — a marker for a spec revision.
+//!   Implementations: [`V1_0`], …, [`V3_6`].
 //! * [`Flame`] — a marker for *one introduction event* (e.g. "Layer
 //!   names were added"). Implementations: [`LayerNameFlame`],
 //!   [`NodeOptionsFlame`], [`MixerDataFlame`], …
 //!
 //! [`IncludesFlame<F>`] is the relation: `V: IncludesFlame<F>` means
-//! "version `V` knows about FLAME `F`". A builder method that depends
-//! on a late field is gated by an `IncludesFlame` bound, so a
-//! `Node<Slave, V3_3_2>` does not see `.with_mixer_*` methods
-//! introduced at `V3_4_1`.
+//! "version `V` knows about flame `F`". This makes compile-time version
+//! gating *expressible* — a builder method can require
+//! `V: IncludesFlame<MixerDataFlame>` so it only appears on new-enough
+//! versions (demonstrated by the `DemoBuilder` unit test below).
+//!
+//! ## What this gates today
+//!
+//! Currently the machinery is **advisory / forward-looking**, not yet
+//! load-bearing on the live API:
+//!
+//! * The `V` parameter on [`Node`](crate::api::Node) /
+//!   [`NodeBuilder`](crate::api::NodeBuilder) is carried as a phantom.
+//!   Outgoing packets always emit `protocol_version 3.6` (hardcoded in
+//!   the wire header), regardless of `V`.
+//! * The production builders do **not** gate their methods on
+//!   `IncludesFlame` yet — only the test `DemoBuilder` does. The
+//!   relation and the per-field `INTRODUCED_AT` constants are kept
+//!   correct (and matrix-tested) so reader-side version reasoning and
+//!   future gating can build on them without re-deriving the change log.
 //!
 //! Versions reconstructed from the change log of TCNet V3.5.1B
 //! (`docs/spec/TCNet-V3-5-1B.pdf`, pages 35-36).
@@ -36,11 +52,13 @@ mod sealed {
 // FLAME we care about.
 // ---------------------------------------------------------------------------
 
-/// A spec revision the local node may speak.
+/// A spec revision marker.
 ///
-/// `MAJOR.MINOR.PATCH` is the canonical `X.Y.Z` form (e.g. `3.5.1`); the
-/// `ManagementHeader.protocol_version_*` bytes always emit `MAJOR` and
-/// `MINOR` (the spec wire layout treats those as static fields).
+/// `MAJOR.MINOR.PATCH` is the canonical `X.Y.Z` form (e.g. `3.5.1`).
+/// Note these consts describe the revision the marker *names* — they
+/// are not what the local node currently puts on the wire: outgoing
+/// `ManagementHeader.protocol_version_*` bytes are hardcoded to `3.6`
+/// regardless of the `V` marker in use (see the module-level note).
 pub trait SpecVersion: sealed::SpecVersionSealed + Copy + Default + 'static {
     const MAJOR: u8;
     const MINOR: u8;

@@ -1,29 +1,31 @@
 //! `Node<R, V>` — the typed public API surface.
 //!
-//! The layered design (wire / transport / session / proto / domain /
-//! runtime) manifests above the line as a single
-//! `Node<R: Role, V: SpecVersion>` handle, parameterised on the local
-//! role and spec version.
+//! A single `Node<R: Role, V: SpecVersion>` handle over the dispatcher
+//! runtime, parameterised on the local role and spec version.
 //!
-//! Methods enforced at the type level:
+//! What the role marker `R` gates:
 //!
-//! * `Node<Slave, V>` — [`snapshot`](Node::snapshot),
-//!   [`layers_for`](Node::layers_for),
-//!   [`mixer_for`](Node::mixer_for),
-//!   `request_*`, [`leave`](Node::leave),
+//! * **Read methods are available on every role** —
+//!   [`snapshot`](Node::snapshot), [`layers_for`](Node::layers_for),
+//!   [`mixer_for`](Node::mixer_for), `request_*`,
 //!   [`clock_offset_for`](Node::clock_offset_for),
-//!   [`election_state`](Node::election_state).
-//! * `Node<Master, V>` — Slave methods plus `Deref<Target = …>` to
-//!   the broadcaster handle: `set_speed`, `set_bpm`, `set_layer_position`,
-//!   `set_cue_marker`, `set_hot_cues`, `load_track`, `set_master_fader`,
-//!   `set_crossfader`, `set_channel_*`, `set_response_*`, ...
-//! * `Node<Auto, V>` — Slave methods plus (planned) `.wait_election()`
-//!   resolving into `Node<Master, V>` if we win the election or
-//!   `Node<Slave, V>` if we lose.
+//!   [`election_state`](Node::election_state), [`leave`](Node::leave).
+//!   Watching foreign controllers is orthogonal to broadcasting.
+//! * `Node<Master, V>` additionally `Deref`s to the broadcaster handle
+//!   ([`ActiveDJNode`]), lighting up the write surface: `set_speed`,
+//!   `set_bpm`, `set_layer_position`, `set_cue_marker`, `set_hot_cues`,
+//!   `load_track`, `set_master_fader`, `set_crossfader`,
+//!   `set_channel_*`, `set_response_*`, ...
+//! * `Node<Slave, V>` / `Node<Auto, V>` / `Node<Repeater, V>` carry no
+//!   broadcaster, so only the read surface is reachable. The marker
+//!   still drives the `NodeType` this node announces on the wire (so
+//!   `Auto` is electable, `Slave` is not).
 
-use super::roles::{Master, Role, Slave};
+use super::roles::{Master, Role};
 use crate::node::dj_controller::{LayerSnapshot, MixerSnapshot, TimeoutError};
-use crate::protocol::{BeatGridHeader, BigWaveformData, CueData, LayerId, NodeId, SmallWaveformData};
+use crate::protocol::{
+    ArtworkFileData, BeatGridHeader, BigWaveformData, CueData, LayerId, NodeId, SmallWaveformData,
+};
 use crate::spec_version::SpecVersion;
 use crate::{ActiveDJNode, ApplicationConfig, DjControllerView, ForeignNodeInfo, TCNetClient, WaveformRequester};
 use std::collections::HashMap;
@@ -69,12 +71,16 @@ pub struct NodeSnapshot {
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum NodeError {
-    /// `Node::join` couldn't bring the runtime / dispatcher up.
-    JoinFailed { reason: String },
+    /// [`NodeBuilder::spawn`](crate::api::NodeBuilder::spawn) couldn't
+    /// bring the runtime / dispatcher up.
+    SpawnFailed { reason: String },
     /// `Node::leave` couldn't broadcast OptOut.
     LeaveFailed,
-    /// A request (waveform / beat-grid / cue / artwork) timed out
-    /// after 5 s, or the underlying request channel closed.
+    /// A request (waveform / beat-grid / cue) did not resolve. Raised
+    /// when the 5 s deadline elapses or the request channel closed. A
+    /// peer that has no data answers with `ErrorNotification(014, EMPTY)`,
+    /// which is not parsed on the requesting side, so an empty peer also
+    /// surfaces here once the deadline passes.
     RequestTimeout,
     /// A request was made for a peer that doesn't currently have a
     /// DjController (e.g. `has_dj_controller == false`).
@@ -84,7 +90,7 @@ pub enum NodeError {
 impl std::fmt::Display for NodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::JoinFailed { reason } => write!(f, "Node::join failed: {}", reason),
+            Self::SpawnFailed { reason } => write!(f, "NodeBuilder::spawn failed: {}", reason),
             Self::LeaveFailed => f.write_str("Node::leave failed"),
             Self::RequestTimeout => f.write_str("request timed out"),
             Self::PeerHasNoController { addr } => {
@@ -104,9 +110,12 @@ impl From<TimeoutError> for NodeError {
 
 /// The typed handle to a running TCNet node.
 ///
-/// `R` is the role marker ([`Slave`] / [`Master`] / [`Auto`](super::roles::Auto)
-/// / [`Repeater`](super::roles::Repeater)); `V` is the
-/// [`SpecVersion`](crate::SpecVersion) the local node emits at.
+/// `R` is the role marker ([`Slave`](super::roles::Slave) /
+/// [`Master`] / [`Auto`](super::roles::Auto) /
+/// [`Repeater`](super::roles::Repeater)), which selects the announced
+/// `NodeType` and gates the write surface. `V` is the declared
+/// [`SpecVersion`]; see that module for what the
+/// marker does and does not gate today.
 ///
 /// Owned, not `Clone`: each `Node` corresponds to a unique set of
 /// bound sockets + tokio runtime.  Pass `&mut Node<…>` through your
@@ -177,8 +186,10 @@ impl<R: Role, V: SpecVersion> Node<R, V> {
     }
 }
 
-// Slave-specific read methods.
-impl<V: SpecVersion> Node<Slave, V> {
+// Foreign-peer read methods — available on every role. Reading a
+// peer's layers / mixer / waveforms is orthogonal to whether the local
+// node broadcasts, so a `Master` can watch other controllers too.
+impl<R: Role, V: SpecVersion> Node<R, V> {
     /// Lazily claim (and cache) the per-peer view for `addr`.
     /// Returns `None` if no DJ-controller-bearing peer is registered
     /// at that address yet.
@@ -220,7 +231,10 @@ impl<V: SpecVersion> Node<Slave, V> {
     }
 
     /// Request a small (low-res) waveform from `addr` for `layer`.
-    /// Returns `Err(RequestTimeout)` if no response arrives within 5 s.
+    ///
+    /// `Err(`[`PeerHasNoController`](NodeError::PeerHasNoController)`)` if the
+    /// peer hasn't sent a DJ packet yet; `Err(`[`RequestTimeout`](NodeError::RequestTimeout)`)`
+    /// if the reply doesn't arrive within 5 s.
     pub async fn request_small_waveform(
         &mut self,
         addr: SocketAddrV4,
@@ -277,6 +291,21 @@ impl<V: SpecVersion> Node<Slave, V> {
             .ok_or(NodeError::PeerHasNoController { addr })?;
         requester.request_cue_data(layer).await.map_err(Into::into)
     }
+
+    /// Request the low-resolution artwork JPEG from `addr` for `layer`.
+    pub async fn request_artwork_file(
+        &mut self,
+        addr: SocketAddrV4,
+        layer: LayerId,
+    ) -> Result<ArtworkFileData, NodeError> {
+        let requester = self
+            .waveform_requester_for(addr)
+            .ok_or(NodeError::PeerHasNoController { addr })?;
+        requester
+            .request_artwork_file(layer)
+            .await
+            .map_err(Into::into)
+    }
 }
 
 // Master-specific deref into the broadcaster handle so every set_* /
@@ -315,6 +344,7 @@ pub(crate) fn from_engine<R: Role, V: SpecVersion>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::roles::Slave;
     use crate::V3_6;
 
     #[test]

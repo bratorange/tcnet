@@ -108,7 +108,7 @@ impl PendingTimeSync {
         self.accept_with_max_age(reply, received_at, DEFAULT_MAX_REPLY_AGE)
     }
 
-    /// Same as [`accept`], but with a custom `max_age` for the
+    /// Same as [`accept`](Self::accept), but with a custom `max_age` for the
     /// staleness check.  Useful in tests that fast-forward time.
     pub fn accept_with_max_age(
         self,

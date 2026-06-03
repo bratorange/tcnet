@@ -1,20 +1,23 @@
 //! Role markers for `Node<R, V>`.
 //!
 //! The TCNet spec lets a node declare itself as Slave, Master, Auto
-//! (let-the-network-decide), or Repeater.  The role determines what
-//! methods make sense on the public surface:
+//! (let-the-network-decide), or Repeater.  Each marker carries the
+//! [`NodeType`](crate::protocol::NodeType) the local node announces on
+//! the wire, and gates the public method surface:
 //!
-//! * `Slave` — receive-only.  May discover peers, snapshot their
-//!   state, request waveform/beat-grid/etc., but doesn't broadcast.
-//! * `Master` — Slave methods plus broadcast Status / Time / Metrics
-//!   / Meta / Mixer and set-layer-metrics.
-//! * `Auto` — Slave methods plus a `.wait_election()` future that
-//!   resolves into `Node<Master>` or `Node<Slave>` depending on
-//!   election outcome.
-//! * `Repeater` — TCNet bridge (untyped in V3.5.1B; treated as
-//!   Slave-equivalent here, surface-level).
+//! * `Slave` — announces `NodeType::Slave`. Read-only: discovers peers,
+//!   snapshots their state, requests waveform/beat-grid/etc.
+//! * `Master` — announces `NodeType::Master`. Read surface plus the
+//!   broadcaster handle (`Deref` to [`ActiveDJNode`](crate::ActiveDJNode)):
+//!   Status / Time / Metrics / Meta / Mixer emission and set-layer-metrics.
+//! * `Auto` — announces `NodeType::Auto`, so it is an election candidate
+//!   (see [`Node::election_state`](crate::api::Node::election_state)).
+//!   Same read-only surface as `Slave`; carries no broadcaster.
+//! * `Repeater` — announces `NodeType::Repeater` (TCNet bridge,
+//!   untyped in V3.5.1B). Read-only surface.
 //!
-//! Sealed trait so consumers can't extend the role set.
+//! All four expose the same read methods; only `Master` adds the write
+//! surface. Sealed trait so consumers can't extend the role set.
 
 mod sealed {
     pub trait RoleSealed {}

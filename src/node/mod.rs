@@ -90,8 +90,8 @@ impl ForeignNode {
     }
 }
 
-/// Identity and bind configuration used by a [`TCNetClient`](crate::TCNetClient)
-/// when it announces itself to peers.
+/// Identity and bind configuration used by the node engine when it
+/// announces itself to peers.
 ///
 /// The defaults bind to `0.0.0.0:65023` and identify as a `Slave` node with
 /// neutral vendor / application names — enough to be discovered on a TCNet

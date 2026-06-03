@@ -436,7 +436,7 @@ impl ActiveNodeInner {
 
 /// Broadcasts this process's state as a TCNet DJ controller node.
 ///
-/// Created via [`TCNetClient::create_active_node`](crate::TCNetClient::create_active_node).
+/// Reached as the `Deref` target of [`Node<Master, _>`](crate::api::Node).
 /// A background tokio task drives the periodic broadcasts:
 ///
 /// * **Time packets** (message type 254) every 20 ms — the high-frequency
@@ -841,7 +841,7 @@ impl ActiveDJNode {
             .store(std::sync::Arc::new(Some(Data::Cue(cue_data))));
     }
 
-    /// Set the persistent [CUE] memory marker for `layer`. Peers that issue a
+    /// Set the persistent CUE memory marker for `layer`. Peers that issue a
     /// [`RequestData`](crate::protocol::RequestData) for
     /// [`CueData`](crate::RequestDataType::CueData) will receive the updated
     /// cue point in slot 0 of the [`CueData`] response.
@@ -860,7 +860,7 @@ impl ActiveDJNode {
 
     /// Replace the hot-cue table for `layer` (slots A–H, indexed 0..8). `None`
     /// entries clear the corresponding pad. Updates the cached
-    /// [`CueData`](crate::protocol::CueData) response.
+    /// [`CueData`] response.
     pub fn set_hot_cues(&mut self, layer: LayerId, hot_cues: [Option<HotCue>; 8]) {
         self.inner
             .update_cue_state(layer, |cs| cs.hot_cues = hot_cues);
