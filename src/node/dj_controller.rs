@@ -270,6 +270,12 @@ pub(crate) enum UserRequest {
         layer: LayerId,
         reply: oneshot::Sender<Result<CueData, TimeoutError>>,
     },
+    /// Fire-and-forget metadata request. The Meta response flows through
+    /// the normal apply path and lands in the layer snapshot's
+    /// artist/title — no reply future needed. Used to pull names for
+    /// tracks loaded BEFORE this node joined: ShowKontrol only pushes
+    /// Meta on track change, so a late joiner never sees them otherwise.
+    Metadata { layer: LayerId },
 }
 
 pub(crate) struct OutgoingRequest {
@@ -300,7 +306,12 @@ impl DjController {
         outgoing_tx: kanal::Sender<OutgoingRequest>,
         foreign_addr: SocketAddrV4,
     ) -> (Self, impl Future<Output = ()>) {
-        let (packet_tx, packet_rx) = kanal::bounded::<Packet>(100);
+        // Sized for packet bursts: the task drains every 10 ms and the
+        // dispatcher try_sends — when full, the NEWEST packet is dropped,
+        // which left the playhead anchored ~300 ms in the past after a
+        // buffered-UDP burst (capture-replay stress test). 2048 covers
+        // ~40 s of Time packets arriving at once.
+        let (packet_tx, packet_rx) = kanal::bounded::<Packet>(2048);
         let (request_tx, request_rx) = kanal::bounded::<UserRequest>(16);
         let state = Arc::new(ArcSwap::from_pointee(DjControllerState::default()));
         let state_bg = state.clone();
@@ -492,6 +503,13 @@ async fn dj_controller_task(
                                     for chunk in chunks.into_iter().flatten() {
                                         assembled.extend(chunk);
                                     }
+                                    // Chunks are padded to a fixed cluster size
+                                    // (ShowKontrol: 4800) — drop the padding tail
+                                    // past the announced total, or it renders as
+                                    // phantom flat columns at the track end.
+                                    if total_data_size > 0 {
+                                        assembled.truncate(total_data_size as usize);
+                                    }
                                     let assembled_size = assembled.len() as u32;
                                     let big = BigWaveformData::new_packet(
                                         layer_id,
@@ -654,6 +672,10 @@ async fn dj_controller_task(
                                     for chunk in chunks.into_iter().flatten() {
                                         assembled.extend(chunk);
                                     }
+                                    // Same padding guard as the BigWaveform arm.
+                                    if total_data_size > 0 {
+                                        assembled.truncate(total_data_size as usize);
+                                    }
                                     let assembled_size = assembled.len() as u32;
                                     let header = BeatGridHeader::new_packet(
                                         layer_id,
@@ -776,6 +798,17 @@ async fn dj_controller_task(
                         layer,
                         deadline: Instant::now() + Duration::from_secs(5),
                         reply: PendingReply::CueData(reply),
+                    });
+                }
+                UserRequest::Metadata { layer } => {
+                    // Fire-and-forget: the Meta response updates the layer
+                    // snapshot via the apply path, no pending entry.
+                    let _ = outgoing_tx.send(OutgoingRequest {
+                        destination: foreign_addr,
+                        data: Data::Request(RequestData {
+                            data_type: RequestDataType::MetaData,
+                            layer,
+                        }),
                     });
                 }
             }
@@ -941,8 +974,8 @@ fn apply_packet(
                 None => return,
             };
             let snap = layers.entry(layer_id).or_default();
-            snap.artist = utf16le_to_string(&m.track_artist);
-            snap.title = utf16le_to_string(&m.track_title);
+            snap.artist = utf32le_to_string(&m.track_artist);
+            snap.title = utf32le_to_string(&m.track_title);
             snap.track_key = m.track_key;
             snap.track_id = m.track_id;
         }
@@ -1025,11 +1058,43 @@ fn ascii_bytes_to_string(bytes: &[u8]) -> String {
         .to_owned()
 }
 
-fn utf16le_to_string(bytes: &[u8]) -> String {
-    let u16_chars: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|b| u16::from_le_bytes([b[0], b[1]]))
+/// Decode a null-terminated UTF-32LE buffer as sent in [`MetaData`] fields.
+///
+/// Verified against ShowKontrol 3.5 wire captures: artist/title are 4 bytes
+/// per character, little-endian (`57 00 00 00` = 'W'). Decoding them as
+/// UTF-16LE instead truncates every name to its first letter, because the
+/// second u16 of each character is `0x0000`.
+fn utf32le_to_string(bytes: &[u8]) -> String {
+    bytes
+        .chunks_exact(4)
+        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
         .take_while(|&c| c != 0)
-        .collect();
-    String::from_utf16_lossy(&u16_chars)
+        .map(|c| char::from_u32(c).unwrap_or(char::REPLACEMENT_CHARACTER))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::utf32le_to_string;
+
+    /// Regression: real ShowKontrol 3.5 MetaData artist bytes (captured
+    /// 2026-06-11) are UTF-32LE. The old UTF-16LE decode returned just "W"
+    /// because the second u16 of every character is 0x0000 — every track
+    /// title/artist in the UI collapsed to its first letter.
+    #[test]
+    fn metadata_strings_decode_as_utf32le() {
+        // "What" exactly as captured on the wire (artist "What So Not").
+        let wire: [u8; 16] = [
+            0x57, 0, 0, 0, // W
+            0x68, 0, 0, 0, // h
+            0x61, 0, 0, 0, // a
+            0x74, 0, 0, 0, // t
+        ];
+        assert_eq!(utf32le_to_string(&wire), "What");
+
+        // Null-terminated mid-buffer: decode stops at the first null char.
+        let mut buf = [0u8; 24];
+        buf[..16].copy_from_slice(&wire);
+        assert_eq!(utf32le_to_string(&buf), "What");
+    }
 }

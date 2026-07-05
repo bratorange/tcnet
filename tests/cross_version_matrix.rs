@@ -114,9 +114,9 @@ fn flame_introductions() -> Vec<FlameIntro> {
             |pv: PeerVersion| pv.includes::<CueExtendedFlame>(),
         ),
         (
-            MetadataUtf16Flame::LABEL,
-            MetadataUtf16Flame::INTRODUCED_AT,
-            |pv: PeerVersion| pv.includes::<MetadataUtf16Flame>(),
+            MetadataUtf32Flame::LABEL,
+            MetadataUtf32Flame::INTRODUCED_AT,
+            |pv: PeerVersion| pv.includes::<MetadataUtf32Flame>(),
         ),
     ]
 }
@@ -181,6 +181,6 @@ fn local_v1_0_only_includes_base_flame() {
     assert!(pv.includes::<BaseFlame>());
     // Anything introduced ≥ V2.0 is excluded.
     assert!(!pv.includes::<MixerDataFlame>());
-    assert!(!pv.includes::<MetadataUtf16Flame>());
+    assert!(!pv.includes::<MetadataUtf32Flame>());
     assert!(!pv.includes::<NodeOptionsFlame>());
 }

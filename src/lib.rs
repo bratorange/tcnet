@@ -150,7 +150,7 @@ pub use spec_version::{
     V3_5_1, V3_6,
     // Flames
     ArtworkFileFlame, BaseFlame, BcolorExplanationFlame, BeatGridInfoFlame, CueDataFlame,
-    CueExtendedFlame, FaderOnAirFlame, LayerNameFlame, MetadataUtf16Flame, MixerDataFlame,
+    CueExtendedFlame, FaderOnAirFlame, LayerNameFlame, MetadataUtf32Flame, MixerDataFlame,
     MixerExtendedFlame, NodeOptionsFlame, OptInVendorFlame, SmallBigWaveformFlame,
     SmpteInTimePacketFlame, UnicastOptInOutFlame,
 };

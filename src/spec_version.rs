@@ -146,7 +146,7 @@ decl_flame!(BcolorExplanationFlame, (3, 3, 3), "Bcolor byte-pair explanation for
 decl_flame!(MixerDataFlame, (3, 4, 1), "Mixer Data packet (msg 200 / data type 150)");
 decl_flame!(MixerExtendedFlame, (3, 4, 2), "Extended data fields on Mixer Data");
 decl_flame!(CueExtendedFlame, (3, 5, 1), "Cue Data for Hot / Memory cues");
-decl_flame!(MetadataUtf16Flame, (3, 5, 0), "UTF-16 encoding in MetaData (was UTF-8)");
+decl_flame!(MetadataUtf32Flame, (3, 5, 0), "UTF-32 encoding in MetaData (was UTF-8)");
 
 // ---------------------------------------------------------------------------
 // IncludesFlame — the version-knows-about-FLAME relation.
@@ -299,10 +299,10 @@ includes!(V3_5:
     BcolorExplanationFlame,
     MixerDataFlame,
     MixerExtendedFlame,
-    MetadataUtf16Flame,
+    MetadataUtf32Flame,
 );
 
-// V3.5.1 — extended Cue (hot/memory), UTF-16 metadata.
+// V3.5.1 — extended Cue (hot/memory), UTF-32 metadata.
 includes!(V3_5_1:
     BaseFlame,
     OptInVendorFlame,
@@ -319,7 +319,7 @@ includes!(V3_5_1:
     MixerDataFlame,
     MixerExtendedFlame,
     CueExtendedFlame,
-    MetadataUtf16Flame,
+    MetadataUtf32Flame,
 );
 
 // V3.6 — superset of V3.5.1 — what we emit today.
@@ -339,7 +339,7 @@ includes!(V3_6:
     MixerDataFlame,
     MixerExtendedFlame,
     CueExtendedFlame,
-    MetadataUtf16Flame,
+    MetadataUtf32Flame,
 );
 
 // ---------------------------------------------------------------------------

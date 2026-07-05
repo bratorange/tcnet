@@ -36,9 +36,9 @@ pub use kanal::SendError;
 /// [`ActiveDJNode::set_response_beat_grid`].
 #[derive(Debug, Clone)]
 pub struct TrackMeta {
-    /// Track title (rendered as UTF-16 LE on the wire).
+    /// Track title (rendered as UTF-32 LE on the wire).
     pub title: String,
-    /// Track artist (rendered as UTF-16 LE on the wire).
+    /// Track artist (rendered as UTF-32 LE on the wire).
     pub artist: String,
     /// Track duration in milliseconds.
     pub duration_ms: u32,
@@ -313,8 +313,8 @@ impl ActiveNodeInner {
         let snap = self.layer(layer);
         let mut artist_buf = [0u8; 256];
         let mut title_buf = [0u8; 256];
-        encode_utf16le(&snap.artist, &mut artist_buf);
-        encode_utf16le(&snap.title, &mut title_buf);
+        encode_utf32le(&snap.artist, &mut artist_buf);
+        encode_utf32le(&snap.title, &mut title_buf);
         Data::Meta(MetaData {
             data_type: 4,
             layer_id: layer.as_packet_id(),
@@ -1076,14 +1076,35 @@ fn smpte_to_u8(mode: SmpteMode) -> u8 {
     }
 }
 
-fn encode_utf16le(s: &str, buf: &mut [u8]) {
+/// Encode a string as null-terminated UTF-32LE, the [`MetaData`] field
+/// format ShowKontrol 3.5 uses on the wire (4 bytes per character).
+fn encode_utf32le(s: &str, buf: &mut [u8]) {
     let mut i = 0;
-    for ch in s.encode_utf16() {
-        if i + 2 > buf.len() {
+    for ch in s.chars() {
+        if i + 4 > buf.len() {
             break;
         }
-        buf[i] = (ch & 0xff) as u8;
-        buf[i + 1] = (ch >> 8) as u8;
-        i += 2;
+        buf[i..i + 4].copy_from_slice(&(ch as u32).to_le_bytes());
+        i += 4;
+    }
+}
+
+#[cfg(test)]
+mod meta_encoding_tests {
+    use super::encode_utf32le;
+
+    /// Regression: MetaData strings must go out as UTF-32LE (4 bytes per
+    /// char), matching what ShowKontrol 3.5 emits — not UTF-16LE.
+    #[test]
+    fn meta_strings_encode_as_utf32le() {
+        let mut buf = [0u8; 16];
+        encode_utf32le("Wh", &mut buf);
+        assert_eq!(&buf[..8], &[0x57, 0, 0, 0, 0x68, 0, 0, 0]);
+        assert_eq!(&buf[8..], &[0u8; 8]);
+
+        // Truncates at the buffer, never writes a partial char.
+        let mut tiny = [0u8; 6];
+        encode_utf32le("AB", &mut tiny);
+        assert_eq!(tiny, [0x41, 0, 0, 0, 0, 0]);
     }
 }

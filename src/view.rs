@@ -99,6 +99,16 @@ impl WaveformRequester {
             .map_err(|_| TimeoutError)?;
         rx.await.map_err(|_| TimeoutError)?
     }
+
+    /// Fire-and-forget metadata request for `layer`. The Meta response
+    /// updates the layer snapshot's artist/title through the normal apply
+    /// path — needed for tracks loaded before this node joined, since
+    /// sources like ShowKontrol only push Meta on track change.
+    pub fn request_metadata(&self, layer: LayerId) -> Result<(), TimeoutError> {
+        self.request_tx
+            .send(UserRequest::Metadata { layer })
+            .map_err(|_| TimeoutError)
+    }
 }
 
 

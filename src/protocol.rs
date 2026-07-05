@@ -526,36 +526,47 @@ impl SmpteMode {
 
 /// Playback speed as transmitted in [`MetricsData`].
 ///
-/// Encoded as an unsigned integer where `32768` = 100% (normal speed),
-/// `0` = stopped, `65536` = 200%. Use [`Speed::as_percent`] for a floating-point
-/// percentage.
+/// Encoded as an unsigned integer where `1_048_576` (2^20) = 100% (normal
+/// speed), `0` = stopped, `2_097_152` = 200%. Verified against ShowKontrol
+/// 3.5 on the wire: a deck at +0.6% tempo sends `1_054_867` = `2^20 × 1.006`.
+/// Use [`Speed::ratio`] / [`Speed::as_percent`] for floating-point values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
 pub struct Speed(pub u32);
 
 impl Speed {
-    /// Normal playback speed (100% / 32768).
-    pub const NORMAL: Speed = Speed(32768);
+    /// Normal playback speed (100% / 2^20).
+    pub const NORMAL: Speed = Speed(1_048_576);
     /// Stopped (0 / 0%).
     pub const STOPPED: Speed = Speed(0);
-    /// Upper bound: 200% playback, spec page 14 says `0-65536`.
-    pub const MAX_RAW: u32 = 65_536;
+    /// Upper bound: 200% playback.
+    pub const MAX_RAW: u32 = 2_097_152;
 
     /// Construct a [`Speed`] from a raw wire integer, enforcing the
-    /// spec-stated `0..=65_536` range. Returns [`WireError::BadValue`] on
+    /// `0..=2_097_152` (200%) range. Returns [`WireError::BadValue`] on
     /// out-of-range input.
     pub fn try_new(raw: u32) -> Result<Self, WireError> {
         if raw > Self::MAX_RAW {
             return Err(WireError::BadValue {
                 at: "Speed",
-                why: "raw value > 65_536 (spec page 14)",
+                why: "raw value > 2_097_152 (200%)",
             });
         }
         Ok(Self(raw))
     }
 
+    /// Construct a [`Speed`] from a playback ratio (`1.0` = normal speed).
+    pub fn from_ratio(ratio: f32) -> Self {
+        Speed((Self::NORMAL.0 as f32 * ratio).round().max(0.0) as u32)
+    }
+
+    /// Return the speed as a playback ratio (`1.0` = normal speed).
+    pub fn ratio(self) -> f32 {
+        self.0 as f32 / Self::NORMAL.0 as f32
+    }
+
     /// Return the speed as a percentage (`100.0` = normal speed).
     pub fn as_percent(self) -> f32 {
-        self.0 as f32 / 327.68
+        self.ratio() * 100.0
     }
 }
 
@@ -872,18 +883,19 @@ pub struct MetricsData {
 
 /// Track metadata (message type 200, data type 4).
 ///
-/// Emitted on track-change. From protocol v3.5 onwards `track_artist` and
-/// `track_title` are encoded as **UTF-16 little-endian** in 256-byte fields
-/// (a null `u16` terminates the string).
+/// Emitted on track-change. `track_artist` and `track_title` are encoded as
+/// **UTF-32 little-endian** in 256-byte fields (a null `u32` terminates the
+/// string) — verified against ShowKontrol 3.5 wire captures, which send
+/// `57 00 00 00 68 00 00 00 …` for "Wh…".
 #[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
 pub struct MetaData {
     pub data_type: u8,               // Datatype 4 = Metadata
     pub layer_id: u8,                // Layer ID
     pub _reserved0: ReservedData<1>, // RESERVED
     pub _reserved1: ReservedData<2>, // RESERVED
-    /// Track artist, UTF-16 LE (null-`u16` terminated).
+    /// Track artist, UTF-32 LE (null-`u32` terminated).
     pub track_artist: [u8; 256],
-    /// Track title, UTF-16 LE (null-`u16` terminated).
+    /// Track title, UTF-32 LE (null-`u32` terminated).
     pub track_title: [u8; 256],
     #[deku(endian = "little")]
     pub track_key: u16, // Track KEY
@@ -908,9 +920,14 @@ pub struct BeatGridHeader {
     #[deku(endian = "little")]
     pub packet_no: u32, // Packet Number
     #[deku(endian = "little")]
-    pub data_cluster_size: u32, // Bytes of entry data in this packet
+    pub data_cluster_size: u32, // Bytes of entry data in this packet (UNRELIABLE — see payload)
     /// Serialised [`BeatGridEntry`] items (each 8 bytes).
-    #[deku(count = "data_cluster_size")]
+    ///
+    /// Read to the end of the datagram, NOT via `data_cluster_size`:
+    /// ShowKontrol 3.5 sends `data_cluster_size = 0` on every beat-grid
+    /// chunk even though the payload fills the rest of the packet, so a
+    /// `count`-based read came back empty (no beat grid → no bar phase).
+    #[deku(read_all)]
     pub payload: Vec<u8>,
 }
 
@@ -1515,6 +1532,31 @@ impl CueData {
 mod wire_type_tests {
     use super::*;
 
+    /// Regression: ShowKontrol 3.5 sends `data_cluster_size = 0` on beat-grid
+    /// chunks while the entry payload fills the rest of the datagram (seen on
+    /// the wire 2026-06-12: data_size 4528, total 2, cluster 0). A
+    /// `count = data_cluster_size` read returned an empty payload, so luchs
+    /// never got a beat grid (and the bar-phase display stayed dead). The
+    /// payload must be read to the end of the packet instead.
+    #[test]
+    fn beat_grid_payload_is_read_to_end_despite_zero_cluster_size() {
+        use deku::DekuContainerRead;
+        let entry = BeatGridEntry::new(1, 20, 0);
+        let entry_bytes = deku::DekuContainerWrite::to_bytes(&entry).unwrap();
+
+        let mut wire = vec![8u8, 1]; // data_type, layer_id
+        wire.extend(16u32.to_le_bytes()); // data_size (2 entries)
+        wire.extend(1u32.to_le_bytes()); // total_packets
+        wire.extend(0u32.to_le_bytes()); // packet_no
+        wire.extend(0u32.to_le_bytes()); // data_cluster_size = 0 (ShowKontrol)
+        wire.extend(&entry_bytes);
+        wire.extend(&entry_bytes);
+
+        let (_, header) = BeatGridHeader::from_bytes((&wire, 0)).unwrap();
+        assert_eq!(header.data_cluster_size, 0);
+        assert_eq!(header.payload.len(), 16, "payload must run to packet end");
+    }
+
     #[test]
     fn bpm_try_from_f32_accepts_typical_values() {
         assert_eq!(Bpm::try_from_f32(120.0).unwrap(), Bpm(12_000));
@@ -1547,18 +1589,29 @@ mod wire_type_tests {
     }
 
     #[test]
-    fn speed_try_new_accepts_in_range_and_rejects_above_65536() {
+    fn speed_try_new_accepts_in_range_and_rejects_above_200_percent() {
         assert_eq!(Speed::try_new(0).unwrap(), Speed::STOPPED);
-        assert_eq!(Speed::try_new(32_768).unwrap(), Speed::NORMAL);
-        assert_eq!(Speed::try_new(65_536).unwrap(), Speed(65_536));
+        assert_eq!(Speed::try_new(1_048_576).unwrap(), Speed::NORMAL);
+        assert_eq!(Speed::try_new(2_097_152).unwrap(), Speed(2_097_152));
         assert!(matches!(
-            Speed::try_new(65_537),
+            Speed::try_new(2_097_153),
             Err(WireError::BadValue { at: "Speed", .. })
         ));
         assert!(matches!(
             Speed::try_new(u32::MAX),
             Err(WireError::BadValue { at: "Speed", .. })
         ));
+    }
+
+    /// Regression: ShowKontrol 3.5 metrics carried speed `1_054_867` for a
+    /// deck running at +0.6% tempo. The old 32768-per-100% reading turned
+    /// that into a ×32 playhead ("minutes ticking like seconds").
+    #[test]
+    fn speed_scale_matches_showkontrol_wire_value() {
+        let observed = Speed(1_054_867);
+        assert!((observed.ratio() - 1.006).abs() < 0.0005);
+        assert!((observed.as_percent() - 100.6).abs() < 0.05);
+        assert_eq!(Speed::from_ratio(1.0), Speed::NORMAL);
     }
 
     #[test]

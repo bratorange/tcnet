@@ -10,7 +10,7 @@ use crate::into_ascii;
 use crate::node::tcnet_packet::management_header;
 use crate::protocol::{
     AutoMasterMode, LayerId, LayerState, LayerStatus, LayerTimecode, MetricsData, MixerChannel,
-    MixerData, NodeOptions, NodeType, OptInData, RequestData, RequestDataType, StatusData,
+    MixerData, NodeOptions, NodeType, OptInData, RequestData, RequestDataType, Speed, StatusData,
     TimePacketData,
 };
 use crate::{ApplicationConfig, TCNetClient};
@@ -146,7 +146,7 @@ fn metrics_l1_bytes(config: &ApplicationConfig, seq: u8) -> (Vec<u8>, Vec<u8>) {
         beat_marker: 2,
         track_length: TRACK_1_LEN,
         current_position: TRACK_1_POS,
-        speed: 32_768, // 100%
+        speed: Speed::NORMAL.0, // 100%
         _reserved3: Default::default(),
         beat_number: 64,
         _reserved4: Default::default(),
@@ -1666,5 +1666,39 @@ fn test_same_node_id_distinct_ips_stay_separate() {
         "two peers sharing node_id=9 from different source IPs collapsed into \
          {dj_entries} entry/entries, expected 2 — the peer-map key must include \
          the source IP, not node_id alone",
+    );
+}
+
+/// Regression: a UDP burst larger than the dj-controller channel must not
+/// drop the NEWEST Time packets. With the old bounded(100) channel and the
+/// 10 ms drain tick, a replayed ~300-packet burst left the playhead anchored
+/// ~300 ms in the past (dispatcher try_send drops when full).
+#[tokio::test]
+async fn burst_of_time_packets_keeps_newest_position() {
+    use crate::node::dj_controller::DjController;
+    use crate::node::tcnet_packet::Packet;
+
+    let config = fake_config();
+    let (outgoing_tx, _outgoing_rx) = kanal::bounded(4096);
+    let (ctrl, task) = DjController::new(outgoing_tx, "127.0.0.1:65023".parse().unwrap());
+
+    let mut last_pos = 0u32;
+    for i in 0..300u32 {
+        let (h, mut d) = time_bytes(&config, i as u8);
+        last_pos = TRACK_1_POS + i * 20;
+        d[0..4].copy_from_slice(&last_pos.to_le_bytes()); // l1_time
+        let pkt = Packet::deserialize_packet(&[h, d].concat()).unwrap();
+        ctrl.packet_tx
+            .try_send(pkt)
+            .expect("channel must absorb a 300-packet burst without dropping");
+    }
+
+    let _task = tokio::spawn(task);
+    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+    let state = ctrl.state.load_full();
+    let l1 = &state.layers[LayerId::L1.index()];
+    assert_eq!(
+        l1.current_time_ms, last_pos,
+        "playhead must anchor to the newest packet of the burst",
     );
 }
