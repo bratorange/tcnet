@@ -24,6 +24,13 @@ pub(crate) struct ForeignNode {
     /// packet from this peer.  Atomically updated on every
     /// observed OptIn / DJ packet; read by the 1 Hz timeout sweep.
     pub last_seen: AtomicU64,
+    /// Wall-clock milliseconds since UNIX epoch of the most recent
+    /// *DJ-class* packet (Status / Metrics / Time / Mixer / …) from
+    /// this peer.  `last_seen` alone can't distinguish a peer that is
+    /// actively pushing layer state from one that has gone quiet but
+    /// still emits its 1 Hz OptIn — PRO DJ LINK Bridge leaves a trail
+    /// of exactly those.  0 until the first DJ packet.
+    pub last_dj_seen: AtomicU64,
     /// Peer's listener address.  Reset on each OptIn in case the
     /// peer's port changes.
     pub address: ArcSwap<SocketAddrV4>,
@@ -42,6 +49,7 @@ impl ForeignNode {
     pub fn new(address: SocketAddrV4, config: ApplicationConfig, last_seen: u64) -> Self {
         Self {
             last_seen: AtomicU64::new(last_seen),
+            last_dj_seen: AtomicU64::new(0),
             address: ArcSwap::from_pointee(address),
             config: ArcSwap::from_pointee(config),
             dj_controller: ArcSwapOption::empty(),
@@ -53,6 +61,12 @@ impl ForeignNode {
     }
     pub fn touch(&self, secs: u64) {
         self.last_seen.store(secs, Ordering::Relaxed);
+    }
+    pub fn last_dj_seen(&self) -> u64 {
+        self.last_dj_seen.load(Ordering::Relaxed)
+    }
+    pub fn touch_dj(&self, millis: u64) {
+        self.last_dj_seen.store(millis, Ordering::Relaxed);
     }
     pub fn address(&self) -> SocketAddrV4 {
         **self.address.load()

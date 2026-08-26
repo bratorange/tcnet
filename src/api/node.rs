@@ -39,6 +39,11 @@ pub struct PeerInfo {
     pub address: SocketAddrV4,
     /// Wall-clock UNIX-seconds timestamp of the last packet from this peer.
     pub last_seen: u64,
+    /// Wall-clock UNIX-**milliseconds** timestamp of the last DJ-class packet
+    /// from this peer; 0 if there has never been one. Rank peers by this when
+    /// choosing which one to read layer state from — see
+    /// [`ForeignNodeInfo::last_dj_seen_ms`](crate::ForeignNodeInfo::last_dj_seen_ms).
+    pub last_dj_seen_ms: u64,
     /// The peer's 16-bit node identifier.
     pub node_id: NodeId,
     /// `true` once any DJ packet has been observed from this peer,
@@ -52,6 +57,7 @@ impl From<ForeignNodeInfo> for PeerInfo {
         Self {
             address: f.address,
             last_seen: f.last_seen,
+            last_dj_seen_ms: f.last_dj_seen_ms,
             node_id: f.node_id,
             has_dj_controller: f.has_dj_controller,
         }
@@ -356,6 +362,7 @@ mod tests {
         let f = ForeignNodeInfo {
             address: SocketAddrV4::new(std::net::Ipv4Addr::new(192, 168, 1, 10), 65023),
             last_seen: 12345,
+            last_dj_seen_ms: 12_345_000,
             node_id: 7,
             has_dj_controller: true,
         };

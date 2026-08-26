@@ -12,7 +12,7 @@ use crate::node::response_data::SharedResponseData;
 use crate::node::tcnet_packet::Data;
 use crate::protocol::{
     ArtworkFileData, AutoMasterMode, BeatGridEntry, BeatGridHeader, BigWaveformData, Bpm, CueData,
-    CueEntry, LayerId, LayerState, LayerStatus, LayerTimecode, MetaData, MetricsData, MixerChannel,
+    CueEntry, LayerId, LayerState, LayerTimecode, MetaData, MetricsData, MixerChannel,
     MixerData, ReservedData, SmallWaveformData, SmpteMode, Speed, StatusData, TimePacketData,
 };
 use arc_swap::ArcSwap;
@@ -254,14 +254,14 @@ impl ActiveNodeInner {
             layer_b_source: l[5].source,
             layer_m_source: l[6].source,
             layer_c_source: l[7].source,
-            layer_1_status: LayerStatus::Variant,
-            layer_2_status: LayerStatus::Variant,
-            layer_3_status: LayerStatus::Variant,
-            layer_4_status: LayerStatus::Variant,
-            layer_a_status: LayerStatus::Variant,
-            layer_b_status: LayerStatus::Variant,
-            layer_m_status: LayerStatus::Variant,
-            layer_c_status: LayerStatus::Variant,
+            layer_1_status: 0,
+            layer_2_status: 0,
+            layer_3_status: 0,
+            layer_4_status: 0,
+            layer_a_status: 0,
+            layer_b_status: 0,
+            layer_m_status: 0,
+            layer_c_status: 0,
             layer_1_track_id: l[0].track_id,
             layer_2_track_id: l[1].track_id,
             layer_3_track_id: l[2].track_id,

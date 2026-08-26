@@ -9,7 +9,7 @@
 use crate::into_ascii;
 use crate::node::tcnet_packet::management_header;
 use crate::protocol::{
-    AutoMasterMode, LayerId, LayerState, LayerStatus, LayerTimecode, MetricsData, MixerChannel,
+    AutoMasterMode, LayerId, LayerState, LayerTimecode, MetricsData, MixerChannel,
     MixerData, NodeOptions, NodeType, OptInData, RequestData, RequestDataType, Speed, StatusData,
     TimePacketData,
 };
@@ -100,14 +100,14 @@ fn status_bytes(config: &ApplicationConfig, seq: u8) -> (Vec<u8>, Vec<u8>) {
         layer_b_source: 0,
         layer_m_source: 0,
         layer_c_source: 0,
-        layer_1_status: LayerStatus::Variant,
-        layer_2_status: LayerStatus::Variant,
-        layer_3_status: LayerStatus::Variant,
-        layer_4_status: LayerStatus::Variant,
-        layer_a_status: LayerStatus::Variant,
-        layer_b_status: LayerStatus::Variant,
-        layer_m_status: LayerStatus::Variant,
-        layer_c_status: LayerStatus::Variant,
+        layer_1_status: 0,
+        layer_2_status: 0,
+        layer_3_status: 0,
+        layer_4_status: 0,
+        layer_a_status: 0,
+        layer_b_status: 0,
+        layer_m_status: 0,
+        layer_c_status: 0,
         layer_1_track_id: TRACK_1_ID,
         layer_2_track_id: TRACK_2_ID,
         layer_3_track_id: 0,
@@ -1701,4 +1701,69 @@ async fn burst_of_time_packets_keeps_newest_position() {
         l1.current_time_ms, last_pos,
         "playhead must anchor to the newest packet of the burst",
     );
+}
+
+// ---------------------------------------------------------------------------
+// PRO DJ LINK Bridge wire-shape regressions
+// ---------------------------------------------------------------------------
+// Both of these were found against a live PRO DJ LINK Bridge 1.1.67, which
+// announces protocol 3.5 and unicasts Status + Time to every registered peer.
+// Every one of those packets was rejected by the parser, so LUCHS saw a
+// permanently frozen playhead (`current_time_ms == 0`) and no layer names.
+
+/// The Bridge sends the Time packet without the eight V3-3-3 "Layer OnAir"
+/// bytes at the tail — 154 bytes on the wire where the full V3.5.1B layout
+/// is 162. It must still parse, with the missing tail reading back as 0.
+#[test]
+fn test_time_packet_without_onair_tail_parses() {
+    use crate::node::tcnet_packet::{Data, Packet};
+
+    let cfg = fake_config();
+    let (header, data) = time_bytes(&cfg, 0);
+    let full = [header.clone(), data.clone()].concat();
+    assert_eq!(full.len(), 162, "full V3.5.1B Time packet is 162 bytes");
+
+    let truncated = &full[..full.len() - 8];
+    assert_eq!(truncated.len(), 154, "Bridge Time packet is 154 bytes");
+
+    let pkt = Packet::deserialize_packet(truncated)
+        .expect("154-byte Time packet must parse — Bridge omits the OnAir tail");
+    let Data::Time(t) = pkt.data else {
+        panic!("expected Time, got {:?}", pkt.data);
+    };
+    assert_eq!(t.l1_time, TRACK_1_POS, "playhead survives the short packet");
+    assert_eq!(t.l1_total_time, TRACK_1_LEN);
+    assert_eq!(t.l1_beat_marker, 2);
+    assert_eq!(t.l1_layer_state, LayerState::Playing);
+    assert_eq!(t.l1_on_air, 0, "absent OnAir tail reads back as 0");
+
+    // The full-length packet must still round-trip unchanged.
+    let pkt = Packet::deserialize_packet(&full).expect("162-byte Time packet must parse");
+    let Data::Time(t) = pkt.data else {
+        panic!("expected Time");
+    };
+    assert_eq!(t.l1_on_air, 200, "present OnAir tail is still read");
+}
+
+/// `LayerStatus` is a plain `0-255` byte (spec page 8), not a one-variant
+/// enum: the Bridge sends 4, which used to fail the whole Status packet.
+#[test]
+fn test_status_packet_with_nonzero_layer_status_parses() {
+    use crate::node::tcnet_packet::{Data, Packet};
+
+    let cfg = fake_config();
+    let (header, mut data) = status_bytes(&cfg, 0);
+    // Layer status bytes sit right after the eight layer-source bytes:
+    // node_count(2) + listener_port(2) + reserved(6) + 8 sources = 18.
+    for b in data.iter_mut().skip(18).take(8) {
+        *b = 4;
+    }
+
+    let pkt = Packet::deserialize_packet(&[header, data].concat())
+        .expect("Status with layer_status=4 must parse");
+    let Data::Status(s) = pkt.data else {
+        panic!("expected Status, got {:?}", pkt.data);
+    };
+    assert_eq!(s.layer_1_status, 4);
+    assert_eq!(s.layer_1_track_id, TRACK_1_ID, "fields after the status bytes stay aligned");
 }

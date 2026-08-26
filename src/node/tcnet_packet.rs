@@ -22,6 +22,10 @@ pub enum SerdeError {
     MessageTypeNotImplemented,
 }
 
+/// Serialised size of [`TimePacketData`] — the full V3.5.1B body, ending
+/// with the eight V3-3-3 "Layer OnAir" bytes.
+const TIME_BODY_LEN: usize = 138;
+
 impl Packet {
     pub fn deserialize_packet(bytes: &[u8]) -> Result<Self, SerdeError> {
         let (remaining, header) =
@@ -122,8 +126,24 @@ impl Packet {
                 }
             }
             254 => {
-                let (_, inner) =
-                    TimePacketData::from_bytes(remaining).map_err(SerdeError::InvalidData)?;
+                // PRO DJ LINK Bridge announces protocol 3.5 but emits the
+                // pre-V3-3-3 Time packet: 154 bytes, i.e. without the eight
+                // trailing "Layer OnAir" bytes the full V3.5.1B layout ends
+                // with. Zero-pad the body so the fields ahead of them —
+                // positions, beat markers, layer states — still decode
+                // instead of the whole packet being dropped.
+                let (rest, bit_off) = remaining;
+                let inner = if bit_off == 0 && rest.len() < TIME_BODY_LEN {
+                    let mut padded = [0u8; TIME_BODY_LEN];
+                    padded[..rest.len()].copy_from_slice(rest);
+                    TimePacketData::from_bytes((&padded, 0))
+                        .map_err(SerdeError::InvalidData)?
+                        .1
+                } else {
+                    TimePacketData::from_bytes(remaining)
+                        .map_err(SerdeError::InvalidData)?
+                        .1
+                };
                 Time(inner)
             }
             _ => return Err(SerdeError::MessageTypeNotImplemented),

@@ -682,17 +682,12 @@ pub struct OptInData {
     pub _reserved1: ReservedData<1>,   // RESERVED
 }
 
-/// Per-layer status byte carried in [`StatusData`].
+/// Per-layer play-head status byte carried in [`StatusData`].
 ///
-/// Only one variant is currently defined by the spec; future protocol
-/// revisions may extend this enum.
-#[derive(Debug, PartialEq, DekuRead, DekuWrite, Clone)]
-#[deku(id_type = "u8")]
-#[repr(u8)]
-pub enum LayerStatus {
-    /// Default / unspecified.
-    Variant = 0,
-}
+/// Spec V3.5.1B page 8 defines it as a plain `0-255` value, not an enum:
+/// PRO DJ LINK Bridge sends `4`, which a single-variant enum rejected —
+/// taking every Status packet with it.
+pub type LayerStatus = u8;
 
 /// Periodic status broadcast (message type 5).
 ///

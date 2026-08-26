@@ -167,6 +167,12 @@ pub struct ForeignNodeInfo {
     /// Wall-clock timestamp (UNIX seconds) of the last packet received from this node.
     /// Nodes silent for ≥ 10 s are dropped from the active set automatically.
     pub last_seen: u64,
+    /// Wall-clock timestamp (UNIX **milliseconds**) of the last DJ-class packet
+    /// (Status / Metrics / Time / Mixer / …) from this node; 0 if there has
+    /// never been one. Pick the peer to read layer state from by the highest
+    /// value here, not by `last_seen` — a peer can keep its OptIn alive long
+    /// after it stopped pushing layer state.
+    pub last_dj_seen_ms: u64,
     /// The 16-bit node identifier reported in the node's `ManagementHeader`.
     pub node_id: NodeId,
     /// `true` once any DJ-controller-class packet (Status / Metrics / Mixer / etc.)
@@ -180,6 +186,7 @@ impl From<&ForeignNode> for ForeignNodeInfo {
         ForeignNodeInfo {
             address: n.address(),
             last_seen: n.last_seen(),
+            last_dj_seen_ms: n.last_dj_seen(),
             node_id: n.config().node_id,
             has_dj_controller: n.has_dj_controller(),
         }

@@ -692,6 +692,7 @@ async fn listen(dispatcher: Arc<Dispatcher>, socket: Arc<UdpSocket>) -> io::Resu
                                 let _ = ctrl.packet_tx.try_send(packet);
                             }
                             foreign_node.touch(timestamp_secs());
+                            foreign_node.touch_dj(timestamp_millis());
 
                             if created_new_ctrl {
                                 publish_nodes_snapshot(
@@ -1007,6 +1008,16 @@ pub fn timestamp_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .expect("time should go forward");
     since_the_epoch.as_secs()
+}
+
+/// Millisecond-resolution wall clock. Used for `ForeignNode::last_dj_seen`,
+/// where one-second resolution is too coarse to tell a peer that is still
+/// pushing DJ state from one that only keeps its OptIn alive.
+pub fn timestamp_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should go forward")
+        .as_millis() as u64
 }
 
 #[cfg(test)]
